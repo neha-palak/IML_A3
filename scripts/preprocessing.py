@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#optas github -- cite
 # preprocessing.py
 # Lightweight ArtEmis preprocessing: subsample CSV -> optional copy images -> text cleaning -> vocab -> encode -> save splits
 """
