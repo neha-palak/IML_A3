@@ -1,0 +1,13 @@
+{
+  "subsample_size": 5000,
+  "rows_kept": 27921,
+  "unique_paintings": 5000,
+  "max_len": 25,
+  "min_word_freq": 2,
+  "vocab_size": 7340,
+  "split_loads": [
+    0.8,
+    0.1,
+    0.1
+  ]
+}
