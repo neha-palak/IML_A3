@@ -2,6 +2,9 @@
 #optas github -- cite
 # preprocessing.py
 # Lightweight ArtEmis preprocessing: stratified subsample CSV -> optional copy images -> text cleaning -> vocab -> encode -> save splits
+
+# python scripts/preprocessing.py --raw-csv artemis_dataset.csv --copy-images 
+
 """
 Usage example:
 
@@ -29,6 +32,8 @@ import argparse
 import json
 import re
 from math import floor
+from PIL import Image
+
 
 # -------------------- CONFIG / DEFAULTS --------------------
 DEFAULT_RAW = "artemis_dataset.csv"        # input CSV (change if needed)
@@ -60,6 +65,40 @@ def clean_text(s: str) -> str:
 
 def tokenize(s: str):
     return clean_text(s).split()
+
+
+def copy_and_resize_images(df, raw_images_dir, output_images_dir, size=(224, 224)):
+    """
+    Copy and resize only the images referenced in the dataset CSV.
+    """
+    os.makedirs(output_images_dir, exist_ok=True)
+
+    print(f"\n🔧 Copying + resizing images to: {output_images_dir}")
+
+    copied = 0
+    missing = 0
+
+    for img_name in df['image']:
+        src = os.path.join(raw_images_dir, img_name)
+        dst = os.path.join(output_images_dir, img_name)
+
+        if not os.path.exists(src):
+            missing += 1
+            continue
+
+        try:
+            img = Image.open(src).convert("RGB")
+            img = img.resize(size, Image.LANCZOS)
+            img.save(dst)
+            copied += 1
+
+        except Exception as e:
+            print(f"Error processing {img_name}: {e}")
+            continue
+
+    print(f"\n Done.")
+    print(f" Resized & saved images: {copied}")
+    print(f" Missing images: {missing}")
 
 # -------------------- VOCAB CLASS --------------------
 class Vocab:
@@ -257,6 +296,23 @@ def main(args):
                 missing += 1
                 # don't flood stdout; only report missing count
         print(f"Done copying images. Missing files: {missing}")
+
+        if args.copy_images:
+            print("\nResizing copied images to 224 x 224 ...")
+
+            for art_style, painting in df[['art_style', 'painting']].drop_duplicates().values:
+                src = Path(args.images_out) / art_style / f"{painting}.jpg"
+                if not src.exists():
+                    continue
+
+                try:
+                    img = Image.open(src).convert("RGB")
+                    img = img.resize((224, 224), Image.LANCZOS)
+                    img.save(src)   # overwrite same file
+                except Exception as e:
+                    print(f"Error resizing {src}: {e}")
+
+            print("Finished resizing all copied images.")
 
     # Clean & tokenize text
     print("Cleaning and tokenizing utterances...")
