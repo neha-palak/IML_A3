@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 #optas github -- cite
 # preprocessing.py
-# Lightweight ArtEmis preprocessing: subsample CSV -> optional copy images -> text cleaning -> vocab -> encode -> save splits
+# Lightweight ArtEmis preprocessing: stratified subsample CSV -> optional copy images -> text cleaning -> vocab -> encode -> save splits
 """
+Usage example:
+
 mkdir -p data_preprocessed
 
 python3 scripts/preprocessing.py \
   --raw-csv artemis_dataset.csv \
   --out-dir data_preprocessed \
   --subsample-size 7500 \
+  --stratify art_style \
   --max-len 25 \
   --min-word-freq 2 \
   --copy-images \
@@ -25,6 +28,7 @@ import pandas as pd
 import argparse
 import json
 import re
+from math import floor
 
 # -------------------- CONFIG / DEFAULTS --------------------
 DEFAULT_RAW = "artemis_dataset.csv"        # input CSV (change if needed)
@@ -48,7 +52,7 @@ def clean_text(s: str) -> str:
     if not isinstance(s, str):
         s = str(s)
     s = s.lower()
-    # keep letters and spaces
+    # keep letters, digits, apostrophes and spaces
     s = re.sub(r"[^a-z0-9\\s']", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
@@ -56,7 +60,6 @@ def clean_text(s: str) -> str:
 
 def tokenize(s: str):
     return clean_text(s).split()
-
 
 # -------------------- VOCAB CLASS --------------------
 class Vocab:
@@ -68,6 +71,9 @@ class Vocab:
     def __init__(self, token_to_idx):
         self.token_to_idx = token_to_idx
         self.idx_to_token = {i: t for t, i in token_to_idx.items()}
+
+    def __len__(self):
+        return len(self.token_to_idx)
 
     @classmethod
     def build(cls, counter: Counter, min_freq=1, max_size=None):
@@ -103,6 +109,62 @@ class Vocab:
         with open(path, "rb") as f:
             token_to_idx = pickle.load(f)
         return cls(token_to_idx)
+
+
+# -------------------- STRATIFIED SAMPLING --------------------
+def stratified_subsample_by_style(df: pd.DataFrame, target_n: int, seed: int = 42):
+    """
+    Proportional stratified sampling by 'art_style' on the unique paintings level.
+    Returns a set of sampled painting IDs (strings).
+    """
+    # group unique paintings per style
+    style_to_paintings = df.groupby('art_style')['painting'].unique().to_dict()
+    style_counts = {s: len(p_list) for s, p_list in style_to_paintings.items()}
+    total = sum(style_counts.values())
+    if total == 0:
+        return set()
+    # ideal fractional allocation
+    ideal = {s: (count / total) * target_n for s, count in style_counts.items()}
+    # start with floor allocations
+    alloc = {s: floor(v) for s, v in ideal.items()}
+    allocated = sum(alloc.values())
+    remainder = target_n - allocated
+    # distribute remainder by largest fractional parts (to reduce bias)
+    fracs = sorted([(s, ideal[s] - alloc[s]) for s in alloc.keys()], key=lambda x: -x[1])
+    i = 0
+    while remainder > 0 and i < len(fracs):
+        s = fracs[i][0]
+        # ensure we don't allocate more than available
+        if alloc[s] < len(style_to_paintings[s]):
+            alloc[s] += 1
+            remainder -= 1
+        i += 1
+        if i == len(fracs) and remainder > 0:
+            # second pass if remainder still >0 (very rare)
+            i = 0
+    # If due to small style counts we allocated less than target, fill up with random from remaining
+    # Now sample from each style
+    rng = np.random.RandomState(seed)
+    sampled = []
+    for s, k in alloc.items():
+        available = list(style_to_paintings[s])
+        k = min(k, len(available))
+        if k <= 0:
+            continue
+        chosen = list(rng.choice(available, size=k, replace=False))
+        sampled.extend(chosen)
+    # If we still haven't reached target_n because some styles didn't have enough paintings,
+    # sample additional paintings from the pool of remaining paintings (non-sampled)
+    sampled_set = set(sampled)
+    if len(sampled_set) < target_n:
+        remaining_paintings = [p for p in df['painting'].unique() if p not in sampled_set]
+        need = target_n - len(sampled_set)
+        if need > len(remaining_paintings):
+            need = len(remaining_paintings)
+        extra = list(rng.choice(remaining_paintings, size=need, replace=False))
+        sampled.extend(extra)
+    # final set
+    return set(sampled)
 
 
 # -------------------- SPLIT BY PAINTING --------------------
@@ -157,8 +219,18 @@ def main(args):
         paintings = df['painting'].unique()
         if args.subsample_size > len(paintings):
             raise ValueError("subsample_size > number of paintings available")
-        rng = np.random.RandomState(args.seed)
-        sampled = set(rng.choice(paintings, size=args.subsample_size, replace=False))
+        if args.stratify == 'art_style':
+            print(f"Stratified proportional sampling by art_style to target {args.subsample_size} paintings...")
+            sampled = stratified_subsample_by_style(df, args.subsample_size, seed=args.seed)
+            print("Per-style sample counts (top 20):")
+            # show counts per style in sampled set
+            sampled_df = df[df['painting'].isin(sampled)]
+            style_counts = sampled_df.groupby('art_style')['painting'].nunique().sort_values(ascending=False)
+            print(style_counts.head(20))
+        else:
+            print(f"Uniform random sampling to {args.subsample_size} paintings...")
+            rng = np.random.RandomState(args.seed)
+            sampled = set(rng.choice(paintings, size=args.subsample_size, replace=False))
         df = df[df['painting'].isin(sampled)].reset_index(drop=True)
         print("After subsampling rows:", len(df), "unique paintings:", df['painting'].nunique())
     else:
@@ -209,8 +281,7 @@ def main(args):
     for toks in df[df['split'] == 'train']['tokens']:
         counter.update(toks)
     vocab = Vocab.build(counter, min_freq=args.min_word_freq, max_size=args.max_vocab_size)
-    print("Vocab size:", len(vocab.token_to_idx))
-
+    print("Vocab size:", len(vocab))
 
     # Encode tokens (pad/truncate) -> tokens_encoded column
     df['tokens_encoded'] = df['tokens'].apply(lambda t: vocab.encode(t, args.max_len))
@@ -245,7 +316,7 @@ def main(args):
         "unique_paintings": int(df['painting'].nunique()),
         "max_len": args.max_len,
         "min_word_freq": args.min_word_freq,
-        "vocab_size": len(vocab.token_to_idx),
+        "vocab_size": len(vocab),
         "split_loads": args.split_loads
     }
     with open(osp.join(args.out_dir, "preprocessing_summary.json"), "w") as f:
@@ -261,6 +332,8 @@ def parse_args():
     p.add_argument("--raw-csv", type=str, default=DEFAULT_RAW, help="raw ArtEmis CSV path")
     p.add_argument("--out-dir", type=str, default=OUT_DIR)
     p.add_argument("--subsample-size", type=int, default=SUBSAMPLE_N, help="num unique paintings to sample (None -> full)")
+    p.add_argument("--stratify", type=str, choices=['none', 'art_style'], default='art_style',
+                   help="if 'art_style', do proportional stratified sampling by art_style; 'none' -> uniform random")
     p.add_argument("--seed", type=int, default=SEED)
     p.add_argument("--max-len", type=int, default=MAX_LEN)
     p.add_argument("--min-word-freq", type=int, default=MIN_WORD_FREQ)
