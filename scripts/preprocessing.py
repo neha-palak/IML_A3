@@ -3,12 +3,12 @@
 # preprocessing.py
 # Lightweight ArtEmis preprocessing: subsample CSV -> optional copy images -> text cleaning -> vocab -> encode -> save splits
 """
-mkdir -p data_processed
+mkdir -p data_preprocessed
 
 python3 scripts/preprocessing.py \
   --raw-csv artemis_dataset.csv \
   --out-dir data_preprocessed \
-  --subsample-size 5000 \
+  --subsample-size 7500 \
   --max-len 25 \
   --min-word-freq 2 \
   --copy-images \
@@ -33,7 +33,7 @@ OUT_SUB_CSV = osp.join(OUT_DIR, "artemis_subsampled.csv")
 OUT_PREP_CSV = osp.join(OUT_DIR, "artemis_preprocessed.csv")
 IMAGES_SUBROOT = osp.join(OUT_DIR, "images_subset")  # optional copied subset
 WIKI_ROOT = "wikiart"                      # path to original wikiart root
-SUBSAMPLE_N = 10000
+SUBSAMPLE_N = 7500
 SEED = 42
 MAX_LEN = 25        # includes <start> and <end>
 MIN_WORD_FREQ = 2
