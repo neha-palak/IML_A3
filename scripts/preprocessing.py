@@ -62,9 +62,28 @@ def clean_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+def subtokenize_word(w: str):
+    """
+    Lightweight rule-based morphological subword segmentation.
+    Example: playing -> play + ing
+    """
+    suffixes = ["ing", "ed", "ly", "ness", "ment", "ful", "less", "able", "ify", "ation", "s"]
+
+    for suf in suffixes:
+        if w.endswith(suf) and len(w) > len(suf) + 2:  
+            return [w[:-len(suf)], suf]  
+    return [w]  
 
 def tokenize(s: str):
-    return clean_text(s).split()
+    """
+    Tokenize + subtokenize English morphological patterns.
+    """
+    tokens = clean_text(s).split()
+    final = []
+    for t in tokens:
+        final.extend(subtokenize_word(t))
+    return final
+
 
 
 def copy_and_resize_images(df, raw_images_dir, output_images_dir, size=(224, 224)):
@@ -243,8 +262,9 @@ def split_by_painting(df, split_loads=SPLIT_LOADS, seed=SEED, too_high_repetitio
 def main(args):
     os.makedirs(args.out_dir, exist_ok=True)
 
-    print("Loading CSV:", args.raw_csv)
-    df = pd.read_csv(args.raw_csv)
+    print("Loading CSV:", DEFAULT_RAW)
+    df = pd.read_csv(DEFAULT_RAW)
+
     print("Rows loaded:", len(df))
 
     # optional dedup
@@ -281,7 +301,9 @@ def main(args):
     print("Saved subsampled CSV to", subsampled_csv)
 
     # Optionally copy images for convenience (safe - does not delete originals)
-    if args.copy_images:
+    COPY_IMAGES = True
+    if COPY_IMAGES:
+
         print("Copying images to", args.images_out)
         os.makedirs(args.images_out, exist_ok=True)
         missing = 0
@@ -297,22 +319,22 @@ def main(args):
                 # don't flood stdout; only report missing count
         print(f"Done copying images. Missing files: {missing}")
 
-        if args.copy_images:
-            print("\nResizing copied images to 224 x 224 ...")
+        
+        print("\nResizing copied images to 224 x 224 ...")
 
-            for art_style, painting in df[['art_style', 'painting']].drop_duplicates().values:
-                src = Path(args.images_out) / art_style / f"{painting}.jpg"
-                if not src.exists():
-                    continue
+        for art_style, painting in df[['art_style', 'painting']].drop_duplicates().values:
+            src = Path(args.images_out) / art_style / f"{painting}.jpg"
+            if not src.exists():
+                continue
 
-                try:
-                    img = Image.open(src).convert("RGB")
-                    img = img.resize((224, 224), Image.LANCZOS)
-                    img.save(src)   # overwrite same file
-                except Exception as e:
-                    print(f"Error resizing {src}: {e}")
+            try:
+                img = Image.open(src).convert("RGB")
+                img = img.resize((224, 224), Image.LANCZOS)
+                img.save(src)   # overwrite same file
+            except Exception as e:
+                print(f"Error resizing {src}: {e}")
 
-            print("Finished resizing all copied images.")
+        print("Finished resizing all copied images.")
 
     # Clean & tokenize text
     print("Cleaning and tokenizing utterances...")
@@ -385,7 +407,7 @@ def main(args):
 # -------------------- ARGUMENTS --------------------
 def parse_args():
     p = argparse.ArgumentParser(description="ArtEmis preprocessing with subsampling and basic tokenization")
-    p.add_argument("--raw-csv", type=str, default=DEFAULT_RAW, help="raw ArtEmis CSV path")
+    #p.add_argument("--raw-csv", type=str, default=DEFAULT_RAW, help="raw ArtEmis CSV path")
     p.add_argument("--out-dir", type=str, default=OUT_DIR)
     p.add_argument("--subsample-size", type=int, default=SUBSAMPLE_N, help="num unique paintings to sample (None -> full)")
     p.add_argument("--stratify", type=str, choices=['none', 'art_style'], default='art_style',
@@ -397,7 +419,7 @@ def parse_args():
     p.add_argument("--split-loads", type=float, nargs=3, default=SPLIT_LOADS)
     p.add_argument("--too-short-len", type=int, default=0)
     p.add_argument("--too-high-repetition", type=int, default=-1)
-    p.add_argument("--copy-images", action="store_true", help="copy images for the sampled subset into out-dir")
+    #p.add_argument("--copy-images", action="store_true", help="copy images for the sampled subset into out-dir")
     p.add_argument("--images-out", type=str, default=IMAGES_SUBROOT, help="where to place copied images")
     p.add_argument("--wiki-root", type=str, default=WIKI_ROOT, help="path to wikiart root images")
     p.add_argument("--dedup", action="store_true", help="drop exact duplicate (painting, utterance) pairs before subsampling")
