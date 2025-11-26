@@ -93,11 +93,23 @@ class Vocab:
 
         return cls(token_to_idx)
 
+    def __len__(self):
+        return len(self.token_to_idx)
+
     def encode(self, tokens, max_len):
         ids = [self.token_to_idx.get(t, self.token_to_idx[self.UNK]) for t in tokens]
         ids = [self.token_to_idx[self.START]] + ids[:max_len - 2] + [self.token_to_idx[self.END]]
         ids += [self.token_to_idx[self.PAD]] * (max_len - len(ids))
         return ids
+
+    # Optional: allow vocab[token] syntax
+    def __getitem__(self, token):
+        return self.token_to_idx.get(token, self.token_to_idx[self.UNK])
+
+    # Optional: provide a property for backward compatibility
+    @property
+    def stoi(self):
+        return self.token_to_idx
 
 
 # ---------------------------------------------------------
@@ -237,16 +249,18 @@ def main():
     vocab = Vocab.build(counter, min_freq=MIN_WORD_FREQ)
     print("Vocab size:", len(vocab))
 
+
     # Convert tokens to IDs + padding
     print("\nConverting tokens to IDs and applying padding...")
 
     MAX_LEN = 20   # choose 20 or 30 depending on captions
-
+    
     def tokens_to_ids(toks, vocab, max_len):
-        ids = [vocab[token] if token in vocab.stoi else vocab["<unk>"] for token in toks]
-        ids = ids[:max_len]                     # truncate
-        ids = ids + [vocab["<pad>"]] * (max_len - len(ids))  # pad
+        ids = [vocab[t] for t in toks]  # uses __getitem__
+        ids = ids[:max_len]              # truncate
+        ids += [vocab[Vocab.PAD]] * (max_len - len(ids))  # pad
         return ids
+
 
     df['token_ids'] = df['tokens'].apply(lambda x: tokens_to_ids(x, vocab, MAX_LEN))
     df['token_ids_len'] = df['token_ids'].apply(len)
