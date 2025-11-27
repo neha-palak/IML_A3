@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-ArtEmis preprocessing with BERT tokenization + reduced vocab + image normalization.
-"""
-
 import os
 import os.path as osp
 import shutil
@@ -15,7 +10,6 @@ import json
 import re
 from math import floor
 from PIL import Image
-from transformers import BertTokenizerFast
 
 # ---------------------------------------------------------
 # FIXED CONFIGURATION
@@ -28,27 +22,25 @@ WIKI_ROOT = "wikiart"
 TARGET_SUBSAMPLE = 7500
 SEED = 42
 
-MAX_LEN = 20  # BERT sequence length
-MIN_WORD_FREQ = 2
-MAX_VOCAB_SIZE = 8000  # You requested 5k–10k; we enforce 8k
+MAX_LEN = 20  # sequence length
+MAX_VOCAB_SIZE = 8000  
 SPLIT_LOADS = (0.8, 0.1, 0.1)
 
 # ---------------------------------------------------------
-# LOWERCASE + BASIC CLEANING BEFORE BERT TOKENIZATION
+# LOWERCASE + BASIC CLEANING BEFORE TOKENIZATION
 # ---------------------------------------------------------
 
 def clean_text_basic(s: str) -> str:
-    """Lowercase & remove punctuation before BERT tokenizer."""
+    """Lowercase & remove punctuation before word-level tokenizer."""
     if not isinstance(s, str):
         s = str(s)
     s = s.lower()
     s = re.sub(r"[^a-z0-9\s']", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
-
-# ---------------------------------------------------------
-# STRATIFIED SAMPLING BY STYLE
-# ---------------------------------------------------------
+def tokenize_word_level(text: str):
+    tokens = text.strip().split()
+    return ["<start>"] + tokens + ["<end>"]
 
 def stratified_subsample_by_style(df, target_n, seed=SEED):
     style_to_paintings = df.groupby('art_style')['painting'].unique().to_dict()
@@ -77,7 +69,6 @@ def stratified_subsample_by_style(df, target_n, seed=SEED):
 
     return set(sampled)
 
-
 # ---------------------------------------------------------
 # TRAIN/VAL/TEST SPLIT
 # ---------------------------------------------------------
@@ -101,7 +92,6 @@ def split_by_painting(df):
 
     df['split'] = df['painting'].apply(assign)
     return df
-
 
 # ---------------------------------------------------------
 # IMAGE COPY + RESIZE + NORMALIZE
@@ -143,7 +133,6 @@ def copy_and_resize_images(df):
     print("Copied & normalized:", copied)
     print("Missing:", missing)
 
-
 # ---------------------------------------------------------
 # MAIN PIPELINE
 # ---------------------------------------------------------
@@ -162,21 +151,12 @@ def main():
     # Copy + normalize images
     copy_and_resize_images(df)
 
-    # Clean text before BERT tokenization
+    # Clean text before tokenization
     df['utter_clean'] = df['utterance'].astype(str).apply(clean_text_basic)
 
-    # BERT tokenizer
-    print("\nLoading BERT tokenizer...")
-    tokenizer = BertTokenizerFast.from_pretrained("bert-base-uncased")
-
-    print("Tokenizing with BERT...")
-
-    # Add manual <start> and <end>
-    def tokenize_with_markers(text):
-        toks = tokenizer.tokenize(text)
-        return ["<start>"] + toks + ["<end>"]
-
-    df['tokens'] = df['utter_clean'].apply(tokenize_with_markers)
+    # Word-level tokenization with <start>/<end>
+    print("\nTokenizing at word level...")
+    df['tokens'] = df['utter_clean'].apply(tokenize_word_level)
 
     # -----------------------------
     # REDUCE VOCAB TO TOP 8000 TOKENS
@@ -217,7 +197,7 @@ def main():
     df = split_by_painting(df)
 
     # Drop requested columns
-    drop_cols = ["art_style", "repetition", "split"]
+    drop_cols = ["repetition","split","token_ids_len","token_ids","utterance"]
     df_out = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
 
     # Save main CSV
@@ -225,8 +205,9 @@ def main():
 
     # Save splits
     for split in ["train", "val", "test"]:
-        part = df_out[df['split'] == split]
-        part.to_csv(osp.join(OUT_DIR, f"{split}.csv"), index=False)
+        part = df[df['split'] == split]
+        part_out = part.drop(columns=[c for c in drop_cols if c in part.columns], errors="ignore")
+        part_out.to_csv(osp.join(OUT_DIR, f"{split}.csv"), index=False)
 
     # Summary
     summary = {
