@@ -1,4 +1,5 @@
 wikiart/
 artemis_dataset.csv
 data_preprocessed/
-data/
+raw_data/
+
