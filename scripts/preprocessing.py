@@ -10,6 +10,7 @@ import json
 import re
 from math import floor
 from PIL import Image
+import argparse
 
 # ---------------------------------------------------------
 # FIXED CONFIGURATION
@@ -17,6 +18,7 @@ from PIL import Image
 RAW_CSV = "artemis_dataset.csv"
 OUT_DIR = "data_preprocessed"
 IMAGES_OUT = osp.join(OUT_DIR, "images_subset")
+FEATURES_OUT = osp.join(OUT_DIR, "features")   # <--- new folder for .npy files
 WIKI_ROOT = "wikiart"
 
 TARGET_SUBSAMPLE = 7500
@@ -99,39 +101,55 @@ def split_by_painting(df):
 
 def copy_and_resize_images(df):
     os.makedirs(IMAGES_OUT, exist_ok=True)
+    os.makedirs(FEATURES_OUT, exist_ok=True)
     print("\nCopying + resizing + normalizing images...")
 
     copied = 0
     missing = 0
+    errors = 0
 
     for style, painting in df[['art_style', 'painting']].drop_duplicates().values:
         src = Path(WIKI_ROOT) / style / f"{painting}.jpg"
         dst_dir = Path(IMAGES_OUT) / style
+        feat_dir = Path(FEATURES_OUT) / style  # mirror structure for features
         dst_dir.mkdir(parents=True, exist_ok=True)
+        feat_dir.mkdir(parents=True, exist_ok=True)
+
         dst = dst_dir / f"{painting}.jpg"
+        feat_path = feat_dir / f"{painting}.npy"
 
         if not src.exists():
             missing += 1
             continue
 
-        shutil.copy2(src, dst)
-
         try:
+            shutil.copy2(src, dst)
+
             img = Image.open(dst).convert("RGB")
             img = img.resize((224, 224), Image.LANCZOS)
             img.save(dst)
 
-            # Normalized version
+            # Normalized version saved in FEATURES_OUT (separate folder)
             arr = np.array(img).astype("float32") / 255.0
-            np.save(dst.with_suffix(".npy"), arr)
+            np.save(feat_path, arr)
 
             copied += 1
         except Exception as e:
             print("Image error:", e)
+            errors += 1
+            # cleanup partials if any
+            try:
+                if dst.exists():
+                    dst.unlink()
+                if feat_path.exists():
+                    feat_path.unlink()
+            except Exception:
+                pass
             continue
 
-    print("Copied & normalized:", copied)
+    print("Copied & normalized (images):", copied)
     print("Missing:", missing)
+    print("Errors:", errors)
 
 # ---------------------------------------------------------
 # MAIN PIPELINE
@@ -148,7 +166,7 @@ def main():
     sampled = stratified_subsample_by_style(df, TARGET_SUBSAMPLE)
     df = df[df['painting'].isin(sampled)].reset_index(drop=True)
 
-    # Copy + normalize images
+    # Copy + normalize images (features saved to FEATURES_OUT)
     copy_and_resize_images(df)
 
     # Clean text before tokenization
@@ -209,12 +227,23 @@ def main():
         part_out = part.drop(columns=[c for c in drop_cols if c in part.columns], errors="ignore")
         part_out.to_csv(osp.join(OUT_DIR, f"{split}.csv"), index=False)
 
-    # Summary
+    # Summary - include counts for images and features
+    n_images_written = 0
+    for root, _, files in os.walk(IMAGES_OUT):
+        n_images_written += sum(1 for f in files if f.lower().endswith(".jpg"))
+    n_features_written = 0
+    for root, _, files in os.walk(FEATURES_OUT):
+        n_features_written += sum(1 for f in files if f.lower().endswith(".npy"))
+
     summary = {
         "subsample_size": TARGET_SUBSAMPLE,
         "max_len": MAX_LEN,
         "vocab_size": len(token_to_idx),
-        "normalization": "pixel values in .npy files are in [0,1]"
+        "normalization": "pixel values in .npy files are in [0,1]",
+        "rows_kept": len(df_out),
+        "unique_paintings": int(df_out['painting'].nunique()),
+        "images_written_flat_folder": n_images_written,
+        "features_written_flat_folder": n_features_written
     }
     with open(osp.join(OUT_DIR, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
