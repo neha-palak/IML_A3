@@ -1,431 +1,245 @@
 #!/usr/bin/env python3
-#optas github -- cite
-# preprocessing.py
-# Lightweight ArtEmis preprocessing: stratified subsample CSV -> optional copy images -> text cleaning -> vocab -> encode -> save splits
-
-# python scripts/preprocessing.py --raw-csv artemis_dataset.csv --copy-images 
-
 """
-Usage example:
-
-mkdir -p data_preprocessed
-
-python3 scripts/preprocessing.py \
-  --raw-csv artemis_dataset.csv \
-  --out-dir data_preprocessed \
-  --subsample-size 7500 \
-  --stratify art_style \
-  --max-len 25 \
-  --min-word-freq 2 \
-  --copy-images \
-  --wiki-root wikiart
+ArtEmis preprocessing with BERT tokenization + reduced vocab + image normalization.
 """
+
 import os
 import os.path as osp
 import shutil
 from pathlib import Path
-import pickle
-from collections import Counter
-import numpy as np
 import pandas as pd
-import argparse
+import numpy as np
+from collections import Counter
+import pickle
 import json
 import re
 from math import floor
 from PIL import Image
+from transformers import BertTokenizerFast
 
+# ---------------------------------------------------------
+# FIXED CONFIGURATION
+# ---------------------------------------------------------
+RAW_CSV = "artemis_dataset.csv"
+OUT_DIR = "data_preprocessed"
+IMAGES_OUT = osp.join(OUT_DIR, "images_subset")
+WIKI_ROOT = "wikiart"
 
-# -------------------- CONFIG / DEFAULTS --------------------
-DEFAULT_RAW = "artemis_dataset.csv"        # input CSV (change if needed)
-OUT_DIR = "data_preprocessed"                           # where outputs go
-OUT_SUB_CSV = osp.join(OUT_DIR, "artemis_subsampled.csv")
-OUT_PREP_CSV = osp.join(OUT_DIR, "artemis_preprocessed.csv")
-IMAGES_SUBROOT = osp.join(OUT_DIR, "images_subset")  # optional copied subset
-WIKI_ROOT = "wikiart"                      # path to original wikiart root
-SUBSAMPLE_N = 7500
+TARGET_SUBSAMPLE = 7500
 SEED = 42
-MAX_LEN = 25        # includes <start> and <end>
+
+MAX_LEN = 20  # BERT sequence length
 MIN_WORD_FREQ = 2
-SPLIT_LOADS = (0.8, 0.1, 0.1)  # train, val, test
-COPY_IMAGES = True   # set False to skip copying images
-DEDUP = False        # drop exact duplicate (painting, utterance) pairs before subsample
+MAX_VOCAB_SIZE = 8000  # You requested 5k–10k; we enforce 8k
+SPLIT_LOADS = (0.8, 0.1, 0.1)
 
+# ---------------------------------------------------------
+# LOWERCASE + BASIC CLEANING BEFORE BERT TOKENIZATION
+# ---------------------------------------------------------
 
-# -------------------- TEXT UTILITIES --------------------
-def clean_text(s: str) -> str:
-    """Lowercase, remove unwanted chars, collapse whitespace."""
+def clean_text_basic(s: str) -> str:
+    """Lowercase & remove punctuation before BERT tokenizer."""
     if not isinstance(s, str):
         s = str(s)
     s = s.lower()
-    # keep letters, digits, apostrophes and spaces
-    s = re.sub(r"[^a-z0-9\\s']", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def subtokenize_word(w: str):
-    """
-    Lightweight rule-based morphological subword segmentation.
-    Example: playing -> play + ing
-    """
-    suffixes = ["ing", "ed", "ly", "ness", "ment", "ful", "less", "able", "ify", "ation", "s"]
-
-    for suf in suffixes:
-        if w.endswith(suf) and len(w) > len(suf) + 2:  
-            return [w[:-len(suf)], suf]  
-    return [w]  
-
-def tokenize(s: str):
-    """
-    Tokenize + subtokenize English morphological patterns.
-    """
-    tokens = clean_text(s).split()
-    final = []
-    for t in tokens:
-        final.extend(subtokenize_word(t))
-    return final
+    s = re.sub(r"[^a-z0-9\s']", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
+# ---------------------------------------------------------
+# STRATIFIED SAMPLING BY STYLE
+# ---------------------------------------------------------
 
-def copy_and_resize_images(df, raw_images_dir, output_images_dir, size=(224, 224)):
-    """
-    Copy and resize only the images referenced in the dataset CSV.
-    """
-    os.makedirs(output_images_dir, exist_ok=True)
-
-    print(f"\n🔧 Copying + resizing images to: {output_images_dir}")
-
-    copied = 0
-    missing = 0
-
-    for img_name in df['image']:
-        src = os.path.join(raw_images_dir, img_name)
-        dst = os.path.join(output_images_dir, img_name)
-
-        if not os.path.exists(src):
-            missing += 1
-            continue
-
-        try:
-            img = Image.open(src).convert("RGB")
-            img = img.resize(size, Image.LANCZOS)
-            img.save(dst)
-            copied += 1
-
-        except Exception as e:
-            print(f"Error processing {img_name}: {e}")
-            continue
-
-    print(f"\n Done.")
-    print(f" Resized & saved images: {copied}")
-    print(f" Missing images: {missing}")
-
-# -------------------- VOCAB CLASS --------------------
-class Vocab:
-    PAD = "<pad>"
-    START = "<start>"
-    END = "<end>"
-    UNK = "<unk>"
-
-    def __init__(self, token_to_idx):
-        self.token_to_idx = token_to_idx
-        self.idx_to_token = {i: t for t, i in token_to_idx.items()}
-
-    def __len__(self):
-        return len(self.token_to_idx)
-
-    @classmethod
-    def build(cls, counter: Counter, min_freq=1, max_size=None):
-        specials = [cls.PAD, cls.START, cls.END, cls.UNK]
-        token_to_idx = {t: i for i, t in enumerate(specials)}
-        items = [(t, c) for t, c in counter.items() if c >= min_freq]
-        items.sort(key=lambda x: (-x[1], x[0]))
-        if max_size is not None:
-            items = items[:max_size]
-        start_idx = len(token_to_idx)
-        for i, (t, _) in enumerate(items):
-            if t in token_to_idx:
-                continue
-            token_to_idx[t] = start_idx + i
-        return cls(token_to_idx)
-
-    def encode(self, tokens, max_len):
-        ids = [self.token_to_idx.get(t, self.token_to_idx[self.UNK]) for t in tokens]
-        ids = [self.token_to_idx[self.START]] + ids[: max_len - 2] + [self.token_to_idx[self.END]]
-        if len(ids) < max_len:
-            ids = ids + [self.token_to_idx[self.PAD]] * (max_len - len(ids))
-        return ids
-
-    def decode(self, ids):
-        return " ".join(self.idx_to_token.get(i, self.UNK) for i in ids)
-
-    def save(self, path):
-        with open(path, "wb") as f:
-            pickle.dump(self.token_to_idx, f)
-
-    @classmethod
-    def load(cls, path):
-        with open(path, "rb") as f:
-            token_to_idx = pickle.load(f)
-        return cls(token_to_idx)
-
-
-# -------------------- STRATIFIED SAMPLING --------------------
-def stratified_subsample_by_style(df: pd.DataFrame, target_n: int, seed: int = 42):
-    """
-    Proportional stratified sampling by 'art_style' on the unique paintings level.
-    Returns a set of sampled painting IDs (strings).
-    """
-    # group unique paintings per style
+def stratified_subsample_by_style(df, target_n, seed=SEED):
     style_to_paintings = df.groupby('art_style')['painting'].unique().to_dict()
-    style_counts = {s: len(p_list) for s, p_list in style_to_paintings.items()}
+    style_counts = {s: len(lst) for s, lst in style_to_paintings.items()}
     total = sum(style_counts.values())
-    if total == 0:
-        return set()
-    # ideal fractional allocation
-    ideal = {s: (count / total) * target_n for s, count in style_counts.items()}
-    # start with floor allocations
+
+    ideal = {s: target_n * (count / total) for s, count in style_counts.items()}
     alloc = {s: floor(v) for s, v in ideal.items()}
-    allocated = sum(alloc.values())
-    remainder = target_n - allocated
-    # distribute remainder by largest fractional parts (to reduce bias)
-    fracs = sorted([(s, ideal[s] - alloc[s]) for s in alloc.keys()], key=lambda x: -x[1])
+    remainder = target_n - sum(alloc.values())
+
+    fracs = sorted([(s, ideal[s] - alloc[s]) for s in alloc],
+                   key=lambda x: -x[1])
+
     i = 0
-    while remainder > 0 and i < len(fracs):
-        s = fracs[i][0]
-        # ensure we don't allocate more than available
-        if alloc[s] < len(style_to_paintings[s]):
-            alloc[s] += 1
-            remainder -= 1
-        i += 1
-        if i == len(fracs) and remainder > 0:
-            # second pass if remainder still >0 (very rare)
-            i = 0
-    # If due to small style counts we allocated less than target, fill up with random from remaining
-    # Now sample from each style
+    while remainder > 0:
+        alloc[fracs[i][0]] += 1
+        remainder -= 1
+        i = (i + 1) % len(fracs)
+
     rng = np.random.RandomState(seed)
     sampled = []
     for s, k in alloc.items():
         available = list(style_to_paintings[s])
-        k = min(k, len(available))
-        if k <= 0:
-            continue
-        chosen = list(rng.choice(available, size=k, replace=False))
+        chosen = rng.choice(available, size=min(k, len(available)), replace=False)
         sampled.extend(chosen)
-    # If we still haven't reached target_n because some styles didn't have enough paintings,
-    # sample additional paintings from the pool of remaining paintings (non-sampled)
-    sampled_set = set(sampled)
-    if len(sampled_set) < target_n:
-        remaining_paintings = [p for p in df['painting'].unique() if p not in sampled_set]
-        need = target_n - len(sampled_set)
-        if need > len(remaining_paintings):
-            need = len(remaining_paintings)
-        extra = list(rng.choice(remaining_paintings, size=need, replace=False))
-        sampled.extend(extra)
-    # final set
+
     return set(sampled)
 
 
-# -------------------- SPLIT BY PAINTING --------------------
-def split_by_painting(df, split_loads=SPLIT_LOADS, seed=SEED, too_high_repetition=-1):
+# ---------------------------------------------------------
+# TRAIN/VAL/TEST SPLIT
+# ---------------------------------------------------------
+
+def split_by_painting(df):
     paintings = df['painting'].unique().tolist()
-    rng = np.random.RandomState(seed)
+    np.random.RandomState(SEED).shuffle(paintings)
 
-    rest_set = set()
-    if too_high_repetition != -1 and 'repetition' in df.columns:
-        rep = df.groupby('painting')['repetition'].first()
-        rest_set = set(rep[rep >= too_high_repetition].index.tolist())
-
-    paintings = [p for p in paintings if p not in rest_set]
-    rng.shuffle(paintings)
     n = len(paintings)
-    n_train = int(split_loads[0] * n)
-    n_val = int(split_loads[1] * n)
+    n_train = int(SPLIT_LOADS[0] * n)
+    n_val = int(SPLIT_LOADS[1] * n)
+
     train_p = set(paintings[:n_train])
     val_p = set(paintings[n_train:n_train + n_val])
     test_p = set(paintings[n_train + n_val:])
 
-    def which(p):
-        if p in rest_set:
-            return 'rest'
-        if p in train_p:
-            return 'train'
-        if p in val_p:
-            return 'val'
-        return 'test'
+    def assign(p):
+        if p in train_p: return "train"
+        if p in val_p: return "val"
+        return "test"
 
-    df = df.copy()
-    df['split'] = df['painting'].apply(which)
+    df['split'] = df['painting'].apply(assign)
     return df
 
 
-# -------------------- MAIN PIPELINE --------------------
-def main(args):
-    os.makedirs(args.out_dir, exist_ok=True)
+# ---------------------------------------------------------
+# IMAGE COPY + RESIZE + NORMALIZE
+# ---------------------------------------------------------
 
-    print("Loading CSV:", DEFAULT_RAW)
-    df = pd.read_csv(DEFAULT_RAW)
+def copy_and_resize_images(df):
+    os.makedirs(IMAGES_OUT, exist_ok=True)
+    print("\nCopying + resizing + normalizing images...")
 
-    print("Rows loaded:", len(df))
+    copied = 0
+    missing = 0
 
-    # optional dedup
-    if args.dedup:
-        before = len(df)
-        df = df.drop_duplicates(subset=['painting', 'utterance']).reset_index(drop=True)
-        print(f"Deduplicated rows: {before} -> {len(df)}")
+    for style, painting in df[['art_style', 'painting']].drop_duplicates().values:
+        src = Path(WIKI_ROOT) / style / f"{painting}.jpg"
+        dst_dir = Path(IMAGES_OUT) / style
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst = dst_dir / f"{painting}.jpg"
 
-    # Subsample paintings (if requested)
-    if args.subsample_size is not None:
-        paintings = df['painting'].unique()
-        if args.subsample_size > len(paintings):
-            raise ValueError("subsample_size > number of paintings available")
-        if args.stratify == 'art_style':
-            print(f"Stratified proportional sampling by art_style to target {args.subsample_size} paintings...")
-            sampled = stratified_subsample_by_style(df, args.subsample_size, seed=args.seed)
-            print("Per-style sample counts (top 20):")
-            # show counts per style in sampled set
-            sampled_df = df[df['painting'].isin(sampled)]
-            style_counts = sampled_df.groupby('art_style')['painting'].nunique().sort_values(ascending=False)
-            print(style_counts.head(20))
-        else:
-            print(f"Uniform random sampling to {args.subsample_size} paintings...")
-            rng = np.random.RandomState(args.seed)
-            sampled = set(rng.choice(paintings, size=args.subsample_size, replace=False))
-        df = df[df['painting'].isin(sampled)].reset_index(drop=True)
-        print("After subsampling rows:", len(df), "unique paintings:", df['painting'].nunique())
-    else:
-        print("No subsampling requested; using full CSV")
+        if not src.exists():
+            missing += 1
+            continue
 
-    # Save the subsampled csv (helpful)
-    subsampled_csv = osp.join(args.out_dir, "artemis_subsampled.csv")
-    df.to_csv(subsampled_csv, index=False)
-    print("Saved subsampled CSV to", subsampled_csv)
+        shutil.copy2(src, dst)
 
-    # Optionally copy images for convenience (safe - does not delete originals)
-    COPY_IMAGES = True
-    if COPY_IMAGES:
+        try:
+            img = Image.open(dst).convert("RGB")
+            img = img.resize((224, 224), Image.LANCZOS)
+            img.save(dst)
 
-        print("Copying images to", args.images_out)
-        os.makedirs(args.images_out, exist_ok=True)
-        missing = 0
-        for art_style, painting in df[['art_style', 'painting']].drop_duplicates().values:
-            src = Path(args.wiki_root) / art_style / (painting + ".jpg")
-            dst_dir = Path(args.images_out) / art_style
-            dst_dir.mkdir(parents=True, exist_ok=True)
-            dst = dst_dir / (painting + ".jpg")
-            if src.exists():
-                shutil.copy2(src, dst)
-            else:
-                missing += 1
-                # don't flood stdout; only report missing count
-        print(f"Done copying images. Missing files: {missing}")
+            # Normalized version
+            arr = np.array(img).astype("float32") / 255.0
+            np.save(dst.with_suffix(".npy"), arr)
 
-        
-        print("\nResizing copied images to 224 x 224 ...")
+            copied += 1
+        except Exception as e:
+            print("Image error:", e)
+            continue
 
-        for art_style, painting in df[['art_style', 'painting']].drop_duplicates().values:
-            src = Path(args.images_out) / art_style / f"{painting}.jpg"
-            if not src.exists():
-                continue
+    print("Copied & normalized:", copied)
+    print("Missing:", missing)
 
-            try:
-                img = Image.open(src).convert("RGB")
-                img = img.resize((224, 224), Image.LANCZOS)
-                img.save(src)   # overwrite same file
-            except Exception as e:
-                print(f"Error resizing {src}: {e}")
 
-        print("Finished resizing all copied images.")
+# ---------------------------------------------------------
+# MAIN PIPELINE
+# ---------------------------------------------------------
 
-    # Clean & tokenize text
-    print("Cleaning and tokenizing utterances...")
-    df['utterance_spelled'] = df['utterance'].astype(str).apply(clean_text)
-    df['tokens'] = df['utterance_spelled'].apply(tokenize)
-    df['tokens_len'] = df['tokens'].apply(len)
+def main():
+    os.makedirs(OUT_DIR, exist_ok=True)
 
-    # Split by painting (train/val/test), ensures no leakage
-    df = split_by_painting(df, split_loads=tuple(args.split_loads), seed=args.seed,
-                           too_high_repetition=args.too_high_repetition)
-    print("Split counts:\n", df['split'].value_counts())
+    print("\nLoading CSV...")
+    df = pd.read_csv(RAW_CSV)
 
-    # Optionally drop too short/long (we keep all by default)
-    if args.too_short_len > 0:
-        before = len(df)
-        df = df[df['tokens_len'] >= args.too_short_len].reset_index(drop=True)
-        print(f"Dropped short captions (<{args.too_short_len}) : {before} -> {len(df)}")
+    # Subsample
+    print("\nSubsampling by art_style...")
+    sampled = stratified_subsample_by_style(df, TARGET_SUBSAMPLE)
+    df = df[df['painting'].isin(sampled)].reset_index(drop=True)
 
-    # Build vocab from train split
-    print("Building vocabulary from train split...")
+    # Copy + normalize images
+    copy_and_resize_images(df)
+
+    # Clean text before BERT tokenization
+    df['utter_clean'] = df['utterance'].astype(str).apply(clean_text_basic)
+
+    # BERT tokenizer
+    print("\nLoading BERT tokenizer...")
+    tokenizer = BertTokenizerFast.from_pretrained("bert-base-uncased")
+
+    print("Tokenizing with BERT...")
+
+    # Add manual <start> and <end>
+    def tokenize_with_markers(text):
+        toks = tokenizer.tokenize(text)
+        return ["<start>"] + toks + ["<end>"]
+
+    df['tokens'] = df['utter_clean'].apply(tokenize_with_markers)
+
+    # -----------------------------
+    # REDUCE VOCAB TO TOP 8000 TOKENS
+    # -----------------------------
+    print("\nBuilding reduced vocab...")
+
     counter = Counter()
-    for toks in df[df['split'] == 'train']['tokens']:
+    for toks in df['tokens']:
         counter.update(toks)
-    vocab = Vocab.build(counter, min_freq=args.min_word_freq, max_size=args.max_vocab_size)
-    print("Vocab size:", len(vocab))
 
-    # Encode tokens (pad/truncate) -> tokens_encoded column
-    df['tokens_encoded'] = df['tokens'].apply(lambda t: vocab.encode(t, args.max_len))
+    # Keep <pad>, <start>, <end>, <unk>
+    SPECIALS = ["<pad>", "<start>", "<end>", "<unk>"]
+    vocab_items = [(tok, cnt) for tok, cnt in counter.items() if tok not in SPECIALS]
+    vocab_items.sort(key=lambda x: -x[1])
+    vocab_items = vocab_items[:MAX_VOCAB_SIZE - len(SPECIALS)]
 
-    # Map emotion to numeric (simple map)
-    if 'emotion' in df.columns:
-        emotions = sorted(df['emotion'].unique())
-        emo2idx = {e: i for i, e in enumerate(emotions)}
-        df['emotion_label'] = df['emotion'].map(emo2idx)
+    token_to_idx = {sp: i for i, sp in enumerate(SPECIALS)}
+    for i, (tok, _) in enumerate(vocab_items, start=len(SPECIALS)):
+        token_to_idx[tok] = i
 
-    # Save processed csv and splits
-    preprocessed_csv = osp.join(args.out_dir, "artemis_preprocessed.csv")
-    df.to_csv(preprocessed_csv, index=False)
-    print("Saved preprocessed csv:", preprocessed_csv)
-
-    # Save train/val/test separately
-    for split in ['train', 'val', 'test', 'rest']:
-        out = osp.join(args.out_dir, f"{split}.csv")
-        if split in df['split'].values:
-            df[df['split'] == split].to_csv(out, index=False)
-            print("Saved split:", split, "->", out)
+    print("Final vocab size:", len(token_to_idx))
 
     # Save vocab
-    vocab_path = osp.join(args.out_dir, "vocabulary.pkl")
-    vocab.save(vocab_path)
-    print("Saved vocab to", vocab_path)
+    with open(osp.join(OUT_DIR, "vocab.pkl"), "wb") as f:
+        pickle.dump(token_to_idx, f)
 
-    # Save quick summary file
+    # Encode tokens
+    print("\nEncoding tokens...")
+    def encode_tokens(toks):
+        ids = [token_to_idx.get(tok, token_to_idx["<unk>"]) for tok in toks]
+        ids = ids[:MAX_LEN]
+        ids += [token_to_idx["<pad>"]] * (MAX_LEN - len(ids))
+        return ids
+
+    df['token_ids'] = df['tokens'].apply(encode_tokens)
+
+    # Split
+    df = split_by_painting(df)
+
+    # Drop requested columns
+    drop_cols = ["art_style", "repetition", "split"]
+    df_out = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
+
+    # Save main CSV
+    df_out.to_csv(osp.join(OUT_DIR, "artemis_preprocessed.csv"), index=False)
+
+    # Save splits
+    for split in ["train", "val", "test"]:
+        part = df_out[df['split'] == split]
+        part.to_csv(osp.join(OUT_DIR, f"{split}.csv"), index=False)
+
+    # Summary
     summary = {
-        "subsample_size": args.subsample_size,
-        "rows_kept": len(df),
-        "unique_paintings": int(df['painting'].nunique()),
-        "max_len": args.max_len,
-        "min_word_freq": args.min_word_freq,
-        "vocab_size": len(vocab),
-        "split_loads": args.split_loads
+        "subsample_size": TARGET_SUBSAMPLE,
+        "max_len": MAX_LEN,
+        "vocab_size": len(token_to_idx),
+        "normalization": "pixel values in .npy files are in [0,1]"
     }
-    with open(osp.join(args.out_dir, "preprocessing_summary.json"), "w") as f:
+    with open(osp.join(OUT_DIR, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
-    print("Saved preprocessing summary")
 
-    print("Done.")
-
-
-# -------------------- ARGUMENTS --------------------
-def parse_args():
-    p = argparse.ArgumentParser(description="ArtEmis preprocessing with subsampling and basic tokenization")
-    #p.add_argument("--raw-csv", type=str, default=DEFAULT_RAW, help="raw ArtEmis CSV path")
-    p.add_argument("--out-dir", type=str, default=OUT_DIR)
-    p.add_argument("--subsample-size", type=int, default=SUBSAMPLE_N, help="num unique paintings to sample (None -> full)")
-    p.add_argument("--stratify", type=str, choices=['none', 'art_style'], default='art_style',
-                   help="if 'art_style', do proportional stratified sampling by art_style; 'none' -> uniform random")
-    p.add_argument("--seed", type=int, default=SEED)
-    p.add_argument("--max-len", type=int, default=MAX_LEN)
-    p.add_argument("--min-word-freq", type=int, default=MIN_WORD_FREQ)
-    p.add_argument("--max-vocab-size", type=int, default=None, help="cap vocab size (None -> no cap)")
-    p.add_argument("--split-loads", type=float, nargs=3, default=SPLIT_LOADS)
-    p.add_argument("--too-short-len", type=int, default=0)
-    p.add_argument("--too-high-repetition", type=int, default=-1)
-    #p.add_argument("--copy-images", action="store_true", help="copy images for the sampled subset into out-dir")
-    p.add_argument("--images-out", type=str, default=IMAGES_SUBROOT, help="where to place copied images")
-    p.add_argument("--wiki-root", type=str, default=WIKI_ROOT, help="path to wikiart root images")
-    p.add_argument("--dedup", action="store_true", help="drop exact duplicate (painting, utterance) pairs before subsampling")
-    return p.parse_args()
+    print("\nDone.")
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    main(args)
+    main()

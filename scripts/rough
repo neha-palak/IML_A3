@@ -6,9 +6,12 @@ Simplified ArtEmis preprocessing pipeline for assignments.
 ✔ Always subsamples paintings to TARGET_SUBSAMPLE
 ✔ Always copies images
 ✔ Always resizes images to 224×224
+✔ Normalizes images to [0,1] and saves .npy versions
 ✔ Cleans + subtokenizes text
-✔ Builds vocabulary
-✔ Saves train/val/test CSVs
+✔ Builds vocabulary (max 8000)
+✔ Uses vocab.encode() to convert tokens → IDs
+✔ Pads/truncates to length 20
+✔ Saves train/val/test CSVs (removing art_style, repetition, split)
 """
 
 import os
@@ -30,12 +33,13 @@ from PIL import Image
 RAW_CSV = "artemis_dataset.csv"
 OUT_DIR = "data_preprocessed"
 IMAGES_OUT = osp.join(OUT_DIR, "images_subset")
-WIKI_ROOT = "wikiart"                    # path containing style folders + .jpg files
+WIKI_ROOT = "wikiart"
 TARGET_SUBSAMPLE = 7500
 SEED = 42
 
-MAX_LEN = 25
+MAX_LEN = 20                # <-- fixed padding length
 MIN_WORD_FREQ = 2
+MAX_VOCAB_SIZE = 8000       # <-- NEW: vocab capped at 8000
 SPLIT_LOADS = (0.8, 0.1, 0.1)
 
 # ---------------------------------------------------------
@@ -81,12 +85,14 @@ class Vocab:
         self.idx_to_token = {i: t for t, i in token_to_idx.items()}
 
     @classmethod
-    def build(cls, counter: Counter, min_freq=1):
+    def build(cls, counter: Counter, min_freq=1, max_size=8000):
         specials = [cls.PAD, cls.START, cls.END, cls.UNK]
         token_to_idx = {t: i for i, t in enumerate(specials)}
 
         items = [(t, c) for t, c in counter.items() if c >= min_freq]
         items.sort(key=lambda x: (-x[1], x[0]))
+
+        items = items[:max_size - len(specials)]
 
         for i, (t, _) in enumerate(items, start=len(specials)):
             token_to_idx[t] = i
@@ -102,14 +108,8 @@ class Vocab:
         ids += [self.token_to_idx[self.PAD]] * (max_len - len(ids))
         return ids
 
-    # Optional: allow vocab[token] syntax
     def __getitem__(self, token):
         return self.token_to_idx.get(token, self.token_to_idx[self.UNK])
-
-    # Optional: provide a property for backward compatibility
-    @property
-    def stoi(self):
-        return self.token_to_idx
 
 
 # ---------------------------------------------------------
@@ -125,9 +125,9 @@ def stratified_subsample_by_style(df, target_n, seed=SEED):
     alloc = {s: floor(v) for s, v in ideal.items()}
     remainder = target_n - sum(alloc.values())
 
-    # distribute remainder
-    fracs = sorted([(s, ideal[s] - alloc[s]) for s in alloc], 
+    fracs = sorted([(s, ideal[s] - alloc[s]) for s in alloc],
                    key=lambda x: -x[1])
+
     i = 0
     while remainder > 0:
         alloc[fracs[i][0]] += 1
@@ -170,12 +170,12 @@ def split_by_painting(df):
 
 
 # ---------------------------------------------------------
-# IMAGE COPY + RESIZE
+# IMAGE COPY + RESIZE + NORMALIZE
 # ---------------------------------------------------------
 
 def copy_and_resize_images(df):
     os.makedirs(IMAGES_OUT, exist_ok=True)
-    print("\nCopying + resizing images to 224×224...")
+    print("\nCopying + resizing images to 224×224 and normalizing...")
 
     copied = 0
     missing = 0
@@ -190,19 +190,22 @@ def copy_and_resize_images(df):
             missing += 1
             continue
 
-        # copy
         shutil.copy2(src, dst)
 
-        # resize
         try:
             img = Image.open(dst).convert("RGB")
             img = img.resize((224, 224), Image.LANCZOS)
             img.save(dst)
+
+            # Save normalized version
+            arr = np.array(img).astype("float32") / 255.0
+            np.save(dst.with_suffix(".npy"), arr)
+
             copied += 1
         except:
             continue
 
-    print(f"Copied + resized: {copied}")
+    print(f"Copied + resized + normalized: {copied}")
     print(f"Missing: {missing}")
 
 
@@ -221,62 +224,49 @@ def main():
     sampled = stratified_subsample_by_style(df, TARGET_SUBSAMPLE)
     df = df[df['painting'].isin(sampled)].reset_index(drop=True)
 
-    # Copy + resize images
+    # Copy + resize + normalize images
     copy_and_resize_images(df)
 
     # Tokenization
     print("\nTokenizing text...")
 
-    def add_special_tokens(toks):
-        return ["<start>"] + toks + ["<end>"]
+    df['tokens'] = df['utterance'].astype(str).apply(lambda x: tokenize(clean_text(x)))
 
-    df['tokens'] = df['utterance'].astype(str).apply(lambda x: add_special_tokens(tokenize(clean_text(x))))
-    df['tokens_len'] = df['tokens'].apply(len)
-
-        # Splits
+    # Splits
     df = split_by_painting(df)
 
     # Vocabulary
     print("\nBuilding vocabulary from train split...")
 
-    MAX_VOCAB_SIZE = 8000
-    MIN_WORD_FREQ = 2
-
     counter = Counter()
     for toks in df[df['split'] == 'train']['tokens']:
         counter.update(toks)
 
-    vocab = Vocab.build(counter, min_freq=MIN_WORD_FREQ)
+    vocab = Vocab.build(counter, min_freq=MIN_WORD_FREQ, max_size=MAX_VOCAB_SIZE)
     print("Vocab size:", len(vocab))
 
+    # Encode tokens using vocab.encode()
+    print("\nEncoding tokens with vocab.encode()...")
 
-    # Convert tokens to IDs + padding
-    print("\nConverting tokens to IDs and applying padding...")
+    df['token_ids'] = df['tokens'].apply(lambda x: vocab.encode(x, MAX_LEN))
 
-    MAX_LEN = 20   # choose 20 or 30 depending on captions
-    
-    def tokens_to_ids(toks, vocab, max_len):
-        ids = [vocab[t] for t in toks]  # uses __getitem__
-        ids = ids[:max_len]              # truncate
-        ids += [vocab[Vocab.PAD]] * (max_len - len(ids))  # pad
-        return ids
+    # Remove columns from output CSVs
+    drop_cols = ["art_style", "repetition", "split", "token_ids_len"]
 
+    # Save master CSV
+    df_out = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
+    df_out.to_csv(osp.join(OUT_DIR, "artemis_preprocessed.csv"), index=False)
 
-    df['token_ids'] = df['tokens'].apply(lambda x: tokens_to_ids(x, vocab, MAX_LEN))
-    df['token_ids_len'] = df['token_ids'].apply(len)
-
-    # Save CSVs
-    df.to_csv(osp.join(OUT_DIR, "artemis_preprocessed.csv"), index=False)
+    # Save splits
     for split in ["train", "val", "test"]:
-        df[df['split'] == split].to_csv(
-            osp.join(OUT_DIR, f"{split}.csv"), index=False
-        )
+        part = df[df['split'] == split].drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
+        part.to_csv(osp.join(OUT_DIR, f"{split}.csv"), index=False)
 
     # Save vocab
     with open(osp.join(OUT_DIR, "vocab.pkl"), "wb") as f:
         pickle.dump(vocab.token_to_idx, f)
 
-    # Save summary
+    # Summary
     summary = {
         "subsample_size": TARGET_SUBSAMPLE,
         "max_len": MAX_LEN,
