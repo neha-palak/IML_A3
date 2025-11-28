@@ -1,50 +1,57 @@
 #!/usr/bin/env python3
 """
-text_representation.py
+text_representation_no_cli.py
 
-Compute TF-IDF (+TruncatedSVD), build pretrained embedding matrices (GloVe, FastText),
-compute coverage metrics, and save outputs for training.
-
-Usage examples:
-
-# GloVe + FastText + TF-IDF (save reduced TF-IDF per split)
-python scripts/text_representation.py \
-  --vocab data_preprocessed/vocab.pkl \
-  --train-csv data_preprocessed/train.csv \
-  --val-csv data_preprocessed/val.csv \
-  --test-csv data_preprocessed/test.csv \
-  --glove data/glove/glove.6B.300d.txt \
-  --out-dir data_preprocessed \
-  --max-features 20000 \
-  --n-components 512 \
-  --save-tfidf-npy \
-  --fasttext data/fasttext/wiki-news-300d-1M-subword.vec
+Same functionality as your original script but runs without CLI.
+Edit the CONFIG dictionary below to change inputs/options, then run:
+    python text_representation_no_cli.py
 """
-import argparse
+
 import os
 import os.path as osp
 import pickle
 import json
 from collections import Counter
 from tqdm import tqdm
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
 
+# -----------------------------
+# CONFIG (edit these values)
+# -----------------------------
+CONFIG = {
+    "vocab": "data_preprocessed/vocab.pkl",
+    "train_csv": "data_preprocessed/train.csv",
+    "val_csv": "data_preprocessed/val.csv",
+    "test_csv": "data_preprocessed/test.csv",
+    "tokens_col": "tokens",
+    "text_col": "utter_clean",
+    "glove": "raw_data/glove.6B.300d.txt", 
+    "fasttext": "raw_data/wiki-news-300d-1M-subword.vec", 
+    "fasttext_max_load": 100000,
+    "out_dir": "data_preprocessed",
+    "max_features": 50000,
+    "n_components": 512,
+    "save_tfidf_npy": False,
+    "do_tfidf": True,
+    "seed": 42,
+}
+
 # --------------------------
-# Utilities
+# Utilities (unchanged)
 # --------------------------
+
 def load_vocab(vocab_path):
     with open(vocab_path, "rb") as f:
-        # expects a dict token -> idx (as in your pipeline)
         token_to_idx = pickle.load(f)
     return token_to_idx
 
 def load_tokens_from_csv(csv_path, tokens_col="tokens", text_col="utter_clean"):
     df = pd.read_csv(csv_path)
-    # load token lists robustly (they might be saved as stringified lists)
     tokens_list = []
     texts = []
     for _, row in df.iterrows():
@@ -68,9 +75,6 @@ def load_tokens_from_csv(csv_path, tokens_col="tokens", text_col="utter_clean"):
         texts.append(row.get(text_col, "") if not pd.isna(row.get(text_col, "")) else "")
     return tokens_list, texts
 
-# --------------------------
-# GloVe loader (efficient)
-# --------------------------
 def load_glove_vectors(glove_path, token_set):
     found = {}
     emb_dim = None
@@ -89,16 +93,12 @@ def load_glove_vectors(glove_path, token_set):
                 break
     return found, emb_dim
 
-# --------------------------
-# FastText .vec loader
-# --------------------------
 def load_fasttext_vectors(ft_path, token_set, max_load=None):
     found = {}
     emb_dim = None
     with open(ft_path, "r", encoding="utf8", errors="ignore") as f:
         header = f.readline()
         if len(header.split()) == 2 and header.split()[1].isdigit():
-            # header present (counts)
             pass
         else:
             f.seek(0)
@@ -118,9 +118,6 @@ def load_fasttext_vectors(ft_path, token_set, max_load=None):
                 break
     return found, emb_dim
 
-# --------------------------
-# Build np embedding matrix
-# --------------------------
 def build_embedding_matrix(token_to_idx, found_vecs, emb_dim, seed=42):
     rng = np.random.RandomState(seed)
     vocab_size = len(token_to_idx)
@@ -133,9 +130,6 @@ def build_embedding_matrix(token_to_idx, found_vecs, emb_dim, seed=42):
             covered += 1
     return mat, covered
 
-# --------------------------
-# Coverage metrics
-# --------------------------
 def token_level_coverage(token_to_idx, found_vecs):
     if len(token_to_idx) == 0:
         return 0.0
@@ -151,10 +145,7 @@ def occurrence_coverage(tokens_lists, found_vecs):
                 covered += 1
     return covered / total if total > 0 else 0.0
 
-# --------------------------
-# TF-IDF + SVD pipeline
-# --------------------------
-def fit_tfidf_and_svd(train_texts, max_features=20000, n_components=512):
+def fit_tfidf_and_svd(train_texts, max_features=50000, n_components=512):
     tfidf = TfidfVectorizer(max_features=max_features, ngram_range=(1,1))
     X = tfidf.fit_transform(train_texts)
     svd = TruncatedSVD(n_components=n_components, random_state=42)
@@ -170,9 +161,8 @@ def transform_and_save_tfidf_for_split(df_csv, tfidf, svd, out_dir):
         np.save(osp.join(out_dir, f"{osp.basename(df_csv)}__{i}.npy"), vec.astype("float32"))
     return len(Xr)
 
-# --------------------------
-# Main
-# --------------------------
+# MAIN (accepts args-like object)
+
 def main(args):
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -259,24 +249,18 @@ def main(args):
     print("\nSaved summary:", out_summary)
     print("Done.")
 
-# CLI
 # --------------------------
+# Run without CLI
+# --------------------------
+
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--vocab", required=True, help="path to vocab.pkl (token->idx)")
-    p.add_argument("--train-csv", required=True, help="train csv for TF-IDF and occurrence coverage")
-    p.add_argument("--val-csv", default=None, help="val csv (optional)")
-    p.add_argument("--test-csv", default=None, help="test csv (optional)")
-    p.add_argument("--tokens-col", default="tokens", help="column name for tokens (list or string)")
-    p.add_argument("--text-col", default="utter_clean", help="column name for raw cleaned text used for TF-IDF")
-    p.add_argument("--glove", default=None, help="path to glove.6B.300d.txt (optional)")
-    p.add_argument("--fasttext", default=None, help="path to fasttext .vec (optional)")
-    p.add_argument("--fasttext-max-load", type=int, default=None, help="limit fasttext lines read (optional)")
-    p.add_argument("--out-dir", required=True, help="output folder (e.g., data_preprocessed)")
-    p.add_argument("--max-features", type=int, default=20000, help="TF-IDF max_features")
-    p.add_argument("--n-components", type=int, default=512, help="TruncatedSVD components")
-    p.add_argument("--save-tfidf-npy", action="store_true", help="save reduced TF-IDF vectors per-row as npy")
-    p.add_argument("--do-tfidf", action="store_true", help="run TF-IDF pipeline")
-    p.add_argument("--seed", type=int, default=42)
-    args = p.parse_args()
+    # convert CONFIG dict into an args-like object
+    args = SimpleNamespace(**CONFIG)
+
+    # Basic checks & helpful messages
+    required_files = [args.vocab, args.train_csv]
+    missing = [p for p in required_files if p is None or not osp.exists(p)]
+    if missing:
+        print("Warning: the following required files are missing or not set:", missing)
+        print("Make sure you update the CONFIG at the top of this script with correct paths.")
     main(args)
