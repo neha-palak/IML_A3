@@ -7,7 +7,7 @@ compute coverage metrics, and save outputs for training.
 
 Usage examples:
 
-# GloVe + TF-IDF (save reduced TF-IDF per split)
+# GloVe + FastText + TF-IDF (save reduced TF-IDF per split)
 python scripts/text_representation.py \
   --vocab data_preprocessed/vocab.pkl \
   --train-csv data_preprocessed/train.csv \
@@ -17,13 +17,8 @@ python scripts/text_representation.py \
   --out-dir data_preprocessed \
   --max-features 20000 \
   --n-components 512 \
-  --save-tfidf-npy
-
-# Add FastText (optional)
-python scripts/text_representation.py \
-  ... \
+  --save-tfidf-npy \
   --fasttext data/fasttext/wiki-news-300d-1M-subword.vec
-
 """
 import argparse
 import os
@@ -239,7 +234,7 @@ def main(args):
             "found_tokens": int(len(glove_found))
         }
 
-    # FastText (optional)
+    # FastText
     if args.fasttext:
         print("\nLoading FastText and building matrix...")
         ft_found, ft_dim = load_fasttext_vectors(args.fasttext, token_set, max_load=args.fasttext_max_load)
@@ -264,7 +259,6 @@ def main(args):
     print("\nSaved summary:", out_summary)
     print("Done.")
 
-# --------------------------
 # CLI
 # --------------------------
 if __name__ == "__main__":

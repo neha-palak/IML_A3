@@ -12,13 +12,12 @@ from math import floor
 from PIL import Image
 import argparse
 
-# ---------------------------------------------------------
 # FIXED CONFIGURATION
-# ---------------------------------------------------------
+
 RAW_CSV = "artemis_dataset.csv"
 OUT_DIR = "data_preprocessed"
 IMAGES_OUT = osp.join(OUT_DIR, "images_subset")
-FEATURES_OUT = osp.join(OUT_DIR, "features")   # <--- new folder for .npy files
+FEATURES_OUT = osp.join(OUT_DIR, "features") 
 WIKI_ROOT = "wikiart"
 
 TARGET_SUBSAMPLE = 7500
@@ -28,9 +27,7 @@ MAX_LEN = 20  # sequence length
 MAX_VOCAB_SIZE = 8000  
 SPLIT_LOADS = (0.8, 0.1, 0.1)
 
-# ---------------------------------------------------------
 # LOWERCASE + BASIC CLEANING BEFORE TOKENIZATION
-# ---------------------------------------------------------
 
 def clean_text_basic(s: str) -> str:
     """Lowercase & remove punctuation before word-level tokenizer."""
@@ -71,9 +68,7 @@ def stratified_subsample_by_style(df, target_n, seed=SEED):
 
     return set(sampled)
 
-# ---------------------------------------------------------
 # TRAIN/VAL/TEST SPLIT
-# ---------------------------------------------------------
 
 def split_by_painting(df):
     paintings = df['painting'].unique().tolist()
@@ -95,9 +90,7 @@ def split_by_painting(df):
     df['split'] = df['painting'].apply(assign)
     return df
 
-# ---------------------------------------------------------
 # IMAGE COPY + RESIZE + NORMALIZE
-# ---------------------------------------------------------
 
 def copy_and_resize_images(df):
     os.makedirs(IMAGES_OUT, exist_ok=True)
@@ -151,9 +144,7 @@ def copy_and_resize_images(df):
     print("Missing:", missing)
     print("Errors:", errors)
 
-# ---------------------------------------------------------
 # MAIN PIPELINE
-# ---------------------------------------------------------
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -176,9 +167,7 @@ def main():
     print("\nTokenizing at word level...")
     df['tokens'] = df['utter_clean'].apply(tokenize_word_level)
 
-    # -----------------------------
     # REDUCE VOCAB TO TOP 8000 TOKENS
-    # -----------------------------
     print("\nBuilding reduced vocab...")
 
     counter = Counter()
