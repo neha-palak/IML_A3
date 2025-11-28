@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-text_representation_no_cli.py
-
-Same functionality as your original script but runs without CLI.
-Edit the CONFIG dictionary below to change inputs/options, then run:
-    python text_representation_no_cli.py
+Runs TF-IDF + TruncatedSVD (with automatic refit to reach a target explained variance),
+builds GloVe/FastText embedding matrices aligned to your vocab, computes coverage metrics,
+and optionally saves per-row reduced TF-IDF .npy for train/val/test.w
 """
 
 import os
@@ -20,9 +18,6 @@ import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
 
-# -----------------------------
-# CONFIG (edit these values)
-# -----------------------------
 CONFIG = {
     "vocab": "data_preprocessed/vocab.pkl",
     "train_csv": "data_preprocessed/train.csv",
@@ -30,20 +25,22 @@ CONFIG = {
     "test_csv": "data_preprocessed/test.csv",
     "tokens_col": "tokens",
     "text_col": "utter_clean",
-    "glove": "raw_data/glove.6B.300d.txt", 
-    "fasttext": "raw_data/wiki-news-300d-1M-subword.vec", 
+    "glove": "raw_data/glove.6B.300d.txt",
+    "fasttext": "raw_data/wiki-news-300d-1M-subword.vec",
     "fasttext_max_load": 100000,
     "out_dir": "data_preprocessed",
-    "max_features": 50000,
-    "n_components": 512,
-    "save_tfidf_npy": False,
+    # TF-IDF settings
+    "max_features": 20000,        # TF-IDF vocabulary size
+    "n_components": 512,         # initial components (used if not auto-refit)
+    "target_variance": 0.80,     # try to reach this cumulative explained variance (0.0-1.0)
+    "max_n_for_refit": 2048,     # max components to scan/refit up to (reduce if low RAM)
+    "save_tfidf_npy": True,      # save per-row reduced TF-IDF vectors (slow)
     "do_tfidf": True,
     "seed": 42,
 }
 
-# --------------------------
-# Utilities (unchanged)
-# --------------------------
+# Utilities
+
 
 def load_vocab(vocab_path):
     with open(vocab_path, "rb") as f:
@@ -98,6 +95,7 @@ def load_fasttext_vectors(ft_path, token_set, max_load=None):
     emb_dim = None
     with open(ft_path, "r", encoding="utf8", errors="ignore") as f:
         header = f.readline()
+        # if header contains counts, skip it; otherwise rewind
         if len(header.split()) == 2 and header.split()[1].isdigit():
             pass
         else:
@@ -145,23 +143,55 @@ def occurrence_coverage(tokens_lists, found_vecs):
                 covered += 1
     return covered / total if total > 0 else 0.0
 
-def fit_tfidf_and_svd(train_texts, max_features=50000, n_components=512):
+# TF-IDF helpers
+
+def fit_tfidf(train_texts, max_features=20000):
     tfidf = TfidfVectorizer(max_features=max_features, ngram_range=(1,1))
     X = tfidf.fit_transform(train_texts)
-    svd = TruncatedSVD(n_components=n_components, random_state=42)
-    Xr = svd.fit_transform(X)
-    return tfidf, svd, X, Xr
+    return tfidf, X
 
-def transform_and_save_tfidf_for_split(df_csv, tfidf, svd, out_dir):
+def fit_truncated_svd_search(X_sparse, max_n=2048, target_variance=0.80, random_state=42):
+    """
+    Fit TruncatedSVD with n_components = max_n to inspect the cumsum curve,
+    then find smallest k where cumsum >= target_variance and return k.
+    """
+    print(f"Fitting TruncatedSVD with n_components={max_n} to inspect variance curve (may be slow)...")
+    svd_full = TruncatedSVD(n_components=max_n, random_state=random_state)
+    svd_full.fit(X_sparse)
+    cumsum = svd_full.explained_variance_ratio_.cumsum()
+    # find smallest k
+    k = None
+    for i, val in enumerate(cumsum):
+        if val >= target_variance:
+            k = i + 1
+            break
+    if k is None:
+        print(f"Target variance {target_variance} not reached by max_n={max_n}. Best = {cumsum[-1]:.4f}")
+        k = max_n
+    else:
+        print(f"Found k={k} achieving cumulative variance {cumsum[k-1]:.4f}")
+    return k, svd_full
+
+def refit_and_save_svd(X_sparse, k, out_dir, random_state=42):
+    print(f"Refitting TruncatedSVD with n_components={k} ...")
+    svd_chosen = TruncatedSVD(n_components=k, random_state=random_state)
+    Xr = svd_chosen.fit_transform(X_sparse)
+    out_svd_path = osp.join(out_dir, "tfidf_svd_refit.pkl")
+    with open(out_svd_path, "wb") as f:
+        pickle.dump(svd_chosen, f)
+    print("Saved refit SVD to:", out_svd_path)
+    return svd_chosen, Xr
+
+def transform_and_save_per_row(tfidf, svd, csv_path, out_dir, split_name):
     os.makedirs(out_dir, exist_ok=True)
-    _, texts = load_tokens_from_csv(df_csv)
+    _, texts = load_tokens_from_csv(csv_path)
     X = tfidf.transform(texts)
     Xr = svd.transform(X)
-    for i, vec in enumerate(tqdm(Xr, desc=f"Saving TF-IDF reduced for {osp.basename(df_csv)}")):
-        np.save(osp.join(out_dir, f"{osp.basename(df_csv)}__{i}.npy"), vec.astype("float32"))
+    for i, vec in enumerate(tqdm(Xr, desc=f"Saving TF-IDF reduced for {split_name}")):
+        np.save(osp.join(out_dir, f"{split_name}__{i:06d}.npy"), vec.astype("float32"))
     return len(Xr)
 
-# MAIN (accepts args-like object)
+# Main logic
 
 def main(args):
     os.makedirs(args.out_dir, exist_ok=True)
@@ -169,7 +199,6 @@ def main(args):
     # load vocab
     token_to_idx = load_vocab(args.vocab)
     print("Vocab size:", len(token_to_idx))
-
     token_set = set(token_to_idx.keys())
 
     # load train tokens/text for occurrence-weighted coverage and tfidf fit
@@ -178,32 +207,40 @@ def main(args):
 
     summary = {"vocab_size": len(token_to_idx), "embeddings": {}, "tfidf": {}}
 
-    # TF-IDF + SVD
+    # TF-IDF + SVD (with automatic refit to reach target_variance)
     if args.do_tfidf:
-        print("\nFitting TF-IDF + TruncatedSVD")
-        tfidf, svd, X_train_sparse, X_train_reduced = fit_tfidf_and_svd(train_texts, max_features=args.max_features, n_components=args.n_components)
-        # save vectorizer + svd
-        with open(osp.join(args.out_dir, "tfidf_vectorizer.pkl"), "wb") as f:
+        print("\nFitting TF-IDF (train only)...")
+        tfidf, X_train_sparse = fit_tfidf(train_texts, max_features=args.max_features)
+        # save vectorizer
+        tfidf_path = osp.join(args.out_dir, "tfidf_vectorizer.pkl")
+        with open(tfidf_path, "wb") as f:
             pickle.dump(tfidf, f)
-        with open(osp.join(args.out_dir, "tfidf_svd.pkl"), "wb") as f:
-            pickle.dump(svd, f)
+        print("Saved TF-IDF vectorizer to:", tfidf_path)
         summary["tfidf"]["n_features"] = X_train_sparse.shape[1]
-        summary["tfidf"]["n_components"] = args.n_components
-        summary["tfidf"]["explained_variance"] = float(svd.explained_variance_ratio_.sum())
-        print("TF-IDF features:", X_train_sparse.shape[1])
-        print("SVD kept:", args.n_components, "explained variance:", svd.explained_variance_ratio_.sum())
 
-        # optionally save per-row reduced tfidf for splits
+        # Inspect + choose k
+        chosen_k, svd_full = fit_truncated_svd_search(X_train_sparse, max_n=args.max_n_for_refit, target_variance=args.target_variance, random_state=args.seed)
+
+        # If chosen_k differs from args.n_components, use chosen_k; else use args.n_components
+        final_k = int(chosen_k) if chosen_k is not None else int(args.n_components)
+        # Refit SVD at final_k
+        svd_chosen, Xr_train = refit_and_save_svd(X_train_sparse, final_k, args.out_dir, random_state=args.seed)
+        summary["tfidf"]["n_components"] = int(final_k)
+        summary["tfidf"]["explained_variance"] = float(svd_chosen.explained_variance_ratio_.sum())
+        print("TF-IDF features:", X_train_sparse.shape[1])
+        print("SVD kept:", final_k, "achieved explained variance:", summary["tfidf"]["explained_variance"])
+
+        # optionally save per-row reduced vectors for train/val/test
         if args.save_tfidf_npy:
-            out_tfidf_dir = osp.join(args.out_dir, "tfidf_npy")
+            out_tfidf_dir = osp.join(args.out_dir, "tfidf_npy_refit")
             if args.train_csv:
-                cnt = transform_and_save_tfidf_for_split(args.train_csv, tfidf, svd, out_tfidf_dir)
+                cnt = transform_and_save_per_row(tfidf, svd_chosen, args.train_csv, out_tfidf_dir, "train")
                 print("Saved TF-IDF reduced for train:", cnt)
             if args.val_csv:
-                cnt = transform_and_save_tfidf_for_split(args.val_csv, tfidf, svd, out_tfidf_dir)
+                cnt = transform_and_save_per_row(tfidf, svd_chosen, args.val_csv, out_tfidf_dir, "val")
                 print("Saved TF-IDF reduced for val:", cnt)
             if args.test_csv:
-                cnt = transform_and_save_tfidf_for_split(args.test_csv, tfidf, svd, out_tfidf_dir)
+                cnt = transform_and_save_per_row(tfidf, svd_chosen, args.test_csv, out_tfidf_dir, "test")
                 print("Saved TF-IDF reduced for test:", cnt)
 
     # GloVe
@@ -242,19 +279,14 @@ def main(args):
             "found_tokens": int(len(ft_found))
         }
 
-    # save summary
     out_summary = osp.join(args.out_dir, "representation_summary.json")
     with open(out_summary, "w") as f:
         json.dump(summary, f, indent=2)
     print("\nSaved summary:", out_summary)
     print("Done.")
 
-# --------------------------
-# Run without CLI
-# --------------------------
 
 if __name__ == "__main__":
-    # convert CONFIG dict into an args-like object
     args = SimpleNamespace(**CONFIG)
 
     # Basic checks & helpful messages
