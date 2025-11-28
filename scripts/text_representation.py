@@ -30,10 +30,10 @@ CONFIG = {
     "fasttext_max_load": 100000,
     "out_dir": "data_preprocessed",
     # TF-IDF settings
-    "max_features": 20000,        # TF-IDF vocabulary size
-    "n_components": 512,         # initial components (used if not auto-refit)
+    "max_features": 20000,       
+    "n_components": 512,        
     "target_variance": 0.80,     # try to reach this cumulative explained variance (0.0-1.0)
-    "max_n_for_refit": 2048,     # max components to scan/refit up to (reduce if low RAM)
+    "max_n": 2048,     # max components to scan/refit up to (reduce if low RAM)
     "save_tfidf_npy": True,      # save per-row reduced TF-IDF vectors (slow)
     "do_tfidf": True,
     "seed": 42,
@@ -172,14 +172,14 @@ def fit_truncated_svd_search(X_sparse, max_n=2048, target_variance=0.80, random_
         print(f"Found k={k} achieving cumulative variance {cumsum[k-1]:.4f}")
     return k, svd_full
 
-def refit_and_save_svd(X_sparse, k, out_dir, random_state=42):
+def save_svd(X_sparse, k, out_dir, random_state=42):
     print(f"Refitting TruncatedSVD with n_components={k} ...")
     svd_chosen = TruncatedSVD(n_components=k, random_state=random_state)
     Xr = svd_chosen.fit_transform(X_sparse)
-    out_svd_path = osp.join(out_dir, "tfidf_svd_refit.pkl")
+    out_svd_path = osp.join(out_dir, "tfidf_svd.pkl")
     with open(out_svd_path, "wb") as f:
         pickle.dump(svd_chosen, f)
-    print("Saved refit SVD to:", out_svd_path)
+    print("Saved SVD to:", out_svd_path)
     return svd_chosen, Xr
 
 def transform_and_save_per_row(tfidf, svd, csv_path, out_dir, split_name):
@@ -207,7 +207,7 @@ def main(args):
 
     summary = {"vocab_size": len(token_to_idx), "embeddings": {}, "tfidf": {}}
 
-    # TF-IDF + SVD (with automatic refit to reach target_variance)
+    # TF-IDF + SVD 
     if args.do_tfidf:
         print("\nFitting TF-IDF (train only)...")
         tfidf, X_train_sparse = fit_tfidf(train_texts, max_features=args.max_features)
@@ -219,12 +219,12 @@ def main(args):
         summary["tfidf"]["n_features"] = X_train_sparse.shape[1]
 
         # Inspect + choose k
-        chosen_k, svd_full = fit_truncated_svd_search(X_train_sparse, max_n=args.max_n_for_refit, target_variance=args.target_variance, random_state=args.seed)
+        chosen_k, svd_full = fit_truncated_svd_search(X_train_sparse, max_n=args.max_n, target_variance=args.target_variance, random_state=args.seed)
 
         # If chosen_k differs from args.n_components, use chosen_k; else use args.n_components
         final_k = int(chosen_k) if chosen_k is not None else int(args.n_components)
         # Refit SVD at final_k
-        svd_chosen, Xr_train = refit_and_save_svd(X_train_sparse, final_k, args.out_dir, random_state=args.seed)
+        svd_chosen, Xr_train = save_svd(X_train_sparse, final_k, args.out_dir, random_state=args.seed)
         summary["tfidf"]["n_components"] = int(final_k)
         summary["tfidf"]["explained_variance"] = float(svd_chosen.explained_variance_ratio_.sum())
         print("TF-IDF features:", X_train_sparse.shape[1])
@@ -232,7 +232,7 @@ def main(args):
 
         # optionally save per-row reduced vectors for train/val/test
         if args.save_tfidf_npy:
-            out_tfidf_dir = osp.join(args.out_dir, "tfidf_npy_refit")
+            out_tfidf_dir = osp.join(args.out_dir, "tfidf_npy")
             if args.train_csv:
                 cnt = transform_and_save_per_row(tfidf, svd_chosen, args.train_csv, out_tfidf_dir, "train")
                 print("Saved TF-IDF reduced for train:", cnt)
