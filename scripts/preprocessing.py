@@ -11,6 +11,7 @@ import re
 from math import floor
 from PIL import Image
 import argparse
+from sklearn.preprocessing import LabelEncoder
 
 # FIXED CONFIGURATION
 
@@ -91,7 +92,6 @@ def split_by_painting(df):
     return df
 
 # IMAGE COPY + RESIZE + NORMALIZE
-
 def copy_and_resize_images(df):
     os.makedirs(IMAGES_OUT, exist_ok=True)
     os.makedirs(FEATURES_OUT, exist_ok=True)
@@ -103,46 +103,47 @@ def copy_and_resize_images(df):
 
     for style, painting in df[['art_style', 'painting']].drop_duplicates().values:
         src = Path(WIKI_ROOT) / style / f"{painting}.jpg"
-        dst_dir = Path(IMAGES_OUT) / style
-        feat_dir = Path(FEATURES_OUT) / style  # mirror structure for features
-        dst_dir.mkdir(parents=True, exist_ok=True)
-        feat_dir.mkdir(parents=True, exist_ok=True)
 
-        dst = dst_dir / f"{painting}.jpg"
-        feat_path = feat_dir / f"{painting}.npy"
+        # ---- Flat output ----
+        dst = Path(IMAGES_OUT) / f"{painting}.jpg"
+        feat_path = Path(FEATURES_OUT) / f"{painting}.npy"
 
         if not src.exists():
             missing += 1
             continue
 
         try:
+            # copy original
             shutil.copy2(src, dst)
 
+            # resize & save JPG
             img = Image.open(dst).convert("RGB")
             img = img.resize((224, 224), Image.LANCZOS)
             img.save(dst)
 
-            # Normalized version saved in FEATURES_OUT (separate folder)
+            # save normalized numpy array
             arr = np.array(img).astype("float32") / 255.0
             np.save(feat_path, arr)
 
             copied += 1
+
         except Exception as e:
             print("Image error:", e)
             errors += 1
-            # cleanup partials if any
+
+            # cleanup partial files
             try:
                 if dst.exists():
                     dst.unlink()
                 if feat_path.exists():
                     feat_path.unlink()
-            except Exception:
+            except:
                 pass
+
             continue
 
-    print("Copied & normalized (images):", copied)
-    print("Missing:", missing)
-    print("Errors:", errors)
+    print(f"Copied: {copied}, Missing: {missing}, Errors: {errors}")
+
 
 # MAIN PIPELINE
 
@@ -203,8 +204,11 @@ def main():
     # Split
     df = split_by_painting(df)
 
+    label_encoder = LabelEncoder()
+    df['emotion_label'] = label_encoder.fit_transform(df['emotion'])
+
     # Drop requested columns
-    drop_cols = ["repetition","split","token_ids_len","token_ids","utterance"]
+    drop_cols = ["repetition","split","token_ids_len","utterance"]
     df_out = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
 
     # Save main CSV
