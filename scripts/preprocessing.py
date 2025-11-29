@@ -118,7 +118,7 @@ def copy_and_resize_images(df):
 
             # resize & save JPG
             img = Image.open(dst).convert("RGB")
-            img = img.resize((224, 224), Image.LANCZOS)
+            img = img.resize((128, 128), Image.LANCZOS)
             img.save(dst)
 
             # save normalized numpy array
@@ -148,6 +148,10 @@ def copy_and_resize_images(df):
 # MAIN PIPELINE
 
 def main():
+    for folder in [IMAGES_OUT, FEATURES_OUT]:
+        shutil.rmtree(folder, ignore_errors=True)
+        os.makedirs(folder, exist_ok=True)
+
     os.makedirs(OUT_DIR, exist_ok=True)
 
     print("\nLoading CSV...")

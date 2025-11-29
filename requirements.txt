@@ -1,5 +1,21 @@
+# Core
 numpy
 pandas
-matplotlib
 scikit-learn
+tqdm
 
+# Deep Learning
+torch
+torchvision
+
+# Image Processing
+Pillow
+
+# NLP + Evaluation Metrics
+nltk
+rouge-score
+pycocoevalcap
+
+# Notebook + Utilities
+jupyter
+matplotlib
