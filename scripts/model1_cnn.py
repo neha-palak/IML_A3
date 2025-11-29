@@ -7,7 +7,7 @@ Usage example:
    --vocab data_preprocessed/vocab.pkl \
    --features_dir data_preprocessed/features \
    --images_dir data_preprocessed/images_subset \
-   --out_dir checkpoints/m1 \
+   --out_dir checkpoints/model1 \
    --out_dir_final checkpoints/summary \
    --epochs 3 --batch_size 16 --embedding_type glove --embedding_dim 300 --freeze_emb
 """
@@ -268,7 +268,7 @@ def main():
     parser.add_argument("--vocab", default="data_preprocessed/vocab.pkl")
     parser.add_argument("--features_dir", default="data_preprocessed/features")
     parser.add_argument("--images_dir", default="data_preprocessed/images_subset")
-    parser.add_argument("--out_dir", default="checkpoints/m1")
+    parser.add_argument("--out_dir", default="checkpoints/model1")
     parser.add_argument("--out_dir_final", default="checkpoints/summary")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=16) # 32 was too slow 
