@@ -275,7 +275,7 @@ def main():
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--feature_dim", type=int, default=256)
     parser.add_argument("--max_len", type=int, default=20)
-    parser.add_argument("--embedding_type", choices=["random","glove","fasttext"], default="random")
+    parser.add_argument("--embedding_type", choices=["random","glove","fasttext"], default="glove")
     parser.add_argument("--freeze_emb", action="store_true", help="If set, freeze pretrained embeddings")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--num_workers", type=int, default=4) 
