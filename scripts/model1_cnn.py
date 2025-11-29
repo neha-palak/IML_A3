@@ -380,7 +380,7 @@ def main():
 
 
         # save history
-        with open(osp.join(args.out_dir_final, "train_history.json"), "w") as f:
+        with open(osp.join(args.out_dir_final, "cnn_history.json"), "w") as f:
             json.dump(history, f, indent=2)
 
     print("Training finished. Best val loss:", best_val)
