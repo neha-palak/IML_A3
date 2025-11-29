@@ -2,4 +2,5 @@ wikiart/
 artemis_dataset.csv
 data_preprocessed/
 raw_data/
-
+checkpoints/model1
+checkpoints/model2
