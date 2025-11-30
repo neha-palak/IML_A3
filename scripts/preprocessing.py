@@ -11,7 +11,6 @@ import re
 from math import floor
 from PIL import Image
 import argparse
-from sklearn.preprocessing import LabelEncoder
 
 # FIXED CONFIGURATION
 
@@ -27,7 +26,7 @@ SEED = 42
 MAX_LEN = 25
 MIN_LEN = 3
 MAX_VOCAB_SIZE = 8000  
-SPLIT_LOADS = (0.8, 0.1, 0.1)
+SPLIT_LOADS = (0.85, 0.05, 0.1)
 
 # LOWERCASE + BASIC CLEANING BEFORE TOKENIZATION
 
@@ -163,6 +162,30 @@ def main():
     sampled = stratified_subsample_by_style(df, TARGET_SUBSAMPLE)
     df = df[df['painting'].isin(sampled)].reset_index(drop=True)
 
+    # --------- DROP 'something else' and map emotions ----------
+    # Keep only desired 8 emotions and map to fixed integer labels
+    valid_emotions = {
+        "amusement": 0,
+        "contentment": 1,
+        "awe": 2,
+        "excitement": 3,
+        "fear": 4,
+        "anger": 5,
+        "sadness": 6,
+        "disgust": 7
+    }
+
+    # Drop 'something else' and anything not in valid_emotions
+    df = df[df['emotion'] != "something else"].reset_index(drop=True)
+    df = df[df['emotion'].isin(valid_emotions.keys())].reset_index(drop=True)
+
+    # Map to labels
+    df['emotion_label'] = df['emotion'].map(valid_emotions).astype(int)
+
+    # optional: print counts for quick check
+    emotion_counts = df['emotion'].value_counts().to_dict()
+    print("Emotion counts after filtering:", emotion_counts)
+
     # Copy + normalize images (features saved to FEATURES_OUT)
     copy_and_resize_images(df)
 
@@ -213,9 +236,6 @@ def main():
     # Split
     df = split_by_painting(df)
 
-    label_encoder = LabelEncoder()
-    df['emotion_label'] = label_encoder.fit_transform(df['emotion'])
-
     # Drop requested columns
     drop_cols = ["repetition","split","token_ids_len","utterance"]
     df_out = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
@@ -229,6 +249,7 @@ def main():
         part_out = part.drop(columns=[c for c in drop_cols if c in part.columns], errors="ignore")
         part_out.to_csv(osp.join(OUT_DIR, f"{split}.csv"), index=False)
 
+    # Save emotion counts into summary
     # Summary - include counts for images and features
     n_images_written = 0
     for root, _, files in os.walk(IMAGES_OUT):
@@ -246,7 +267,8 @@ def main():
         "rows_kept": len(df_out),
         "unique_paintings": int(df_out['painting'].nunique()),
         "images_written_flat_folder": n_images_written,
-        "features_written_flat_folder": n_features_written
+        "features_written_flat_folder": n_features_written,
+        "emotion_counts": emotion_counts
     }
     with open(osp.join(OUT_DIR, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
