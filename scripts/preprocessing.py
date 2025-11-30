@@ -20,7 +20,7 @@ IMAGES_OUT = osp.join(OUT_DIR, "images_subset")
 FEATURES_OUT = osp.join(OUT_DIR, "features") 
 WIKI_ROOT = "wikiart"
 
-TARGET_SUBSAMPLE = 7500
+TARGET_SUBSAMPLE = 5500
 SEED = 42
 
 MAX_LEN = 25
