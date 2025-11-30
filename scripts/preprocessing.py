@@ -24,7 +24,8 @@ WIKI_ROOT = "wikiart"
 TARGET_SUBSAMPLE = 7500
 SEED = 42
 
-MAX_LEN = 20  # sequence length
+MAX_LEN = 25
+MIN_LEN = 3
 MAX_VOCAB_SIZE = 8000  
 SPLIT_LOADS = (0.8, 0.1, 0.1)
 
@@ -172,6 +173,10 @@ def main():
     print("\nTokenizing at word level...")
     df['tokens'] = df['utter_clean'].apply(tokenize_word_level)
 
+    #adding min len restriction
+    df['tok_len'] = df['tokens'].apply(lambda t: max(0, len(t) - 2))  # remove <start> and <end>
+    df = df[(df['tok_len'] >= MIN_LEN) & (df['tok_len'] <= MAX_LEN)].reset_index(drop=True)
+
     # REDUCE VOCAB TO TOP 8000 TOKENS
     print("\nBuilding reduced vocab...")
 
@@ -235,6 +240,7 @@ def main():
     summary = {
         "subsample_size": TARGET_SUBSAMPLE,
         "max_len": MAX_LEN,
+        "min_len": MIN_LEN,
         "vocab_size": len(token_to_idx),
         "normalization": "pixel values in .npy files are in [0,1]",
         "rows_kept": len(df_out),
