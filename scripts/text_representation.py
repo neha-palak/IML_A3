@@ -41,7 +41,6 @@ CONFIG = {
 
 # Utilities
 
-
 def load_vocab(vocab_path):
     with open(vocab_path, "rb") as f:
         token_to_idx = pickle.load(f)
