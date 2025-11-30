@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-Runs TF-IDF + TruncatedSVD (with automatic refit to reach a target explained variance),
-builds GloVe/FastText embedding matrices aligned to your vocab, computes coverage metrics,
-and optionally saves per-row reduced TF-IDF .npy for train/val/test.w
-"""
+text_representation_no_cli.py
 
+TF-IDF + TruncatedSVD (auto-refit to reach target explained variance),
+builds GloVe/FastText embedding matrices aligned to your vocab (which excludes emotion tokens),
+computes coverage metrics, and optionally saves per-row reduced TF-IDF .npy for train/val/test.
+
+Edit CONFIG at top if needed, then run:
+    python scripts/text_representation_no_cli.py
+"""
 import os
 import os.path as osp
 import pickle
@@ -18,42 +22,53 @@ import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
 
+# -----------------------------
+# CONFIG (edit these values)
+# -----------------------------
 CONFIG = {
     "vocab": "data_preprocessed/vocab.pkl",
     "train_csv": "data_preprocessed/train.csv",
     "val_csv": "data_preprocessed/val.csv",
     "test_csv": "data_preprocessed/test.csv",
-    "tokens_col": "tokens",
-    "text_col": "utter_clean",
+    # NOTE: use the no-emotion columns produced by preprocessing
+    "tokens_col": "tokens_c1",
+    "text_col": "utter_c1",
     "glove": "raw_data/glove.6B.300d.txt",
     "fasttext": "raw_data/wiki-news-300d-1M-subword.vec",
-    "fasttext_max_load": 100000,
+    "fasttext_max_load": 100000,    # set None to scan entire file (slow)
     "out_dir": "data_preprocessed",
     # TF-IDF settings
-    "max_features": 20000,       
-    "n_components": 512,        
-    "target_variance": 0.80,     # try to reach this cumulative explained variance (0.0-1.0)
-    "max_n": 2048,     # max components to scan/refit up to (reduce if low RAM)
-    "save_tfidf_npy": True,      # save per-row reduced TF-IDF vectors (slow)
+    "max_features": 20000,       # word features for TF-IDF (reduce if RAM is tight)
+    "n_components": 512,         # fallback n_components if auto search not applied
+    "target_variance": 0.80,     # target cumulative explained variance for TF-IDF SVD
+    "max_n": 1024,               # max components to scan/refit up to (reduce if low RAM)
+    "save_tfidf_npy": True,      # save per-row reduced TF-IDF vectors (slow & disk-heavy)
     "do_tfidf": True,
     "seed": 42,
 }
 
+# --------------------------
 # Utilities
+# --------------------------
 
 def load_vocab(vocab_path):
     with open(vocab_path, "rb") as f:
         token_to_idx = pickle.load(f)
+    # if the saved object is a class holding .token_to_idx
+    if not isinstance(token_to_idx, dict) and hasattr(token_to_idx, "token_to_idx"):
+        token_to_idx = token_to_idx.token_to_idx
+    if not isinstance(token_to_idx, dict):
+        raise RuntimeError("vocab.pkl must be a dict or an object with .token_to_idx")
     return token_to_idx
 
-def load_tokens_from_csv(csv_path, tokens_col="tokens", text_col="utter_clean"):
+def load_tokens_from_csv(csv_path, tokens_col="tokens_c1", text_col="utter_c1"):
     df = pd.read_csv(csv_path)
     tokens_list = []
     texts = []
     for _, row in df.iterrows():
         # tokens (optional)
         t = row.get(tokens_col, None)
-        if pd.isna(t):
+        if pd.isna(t) or t is None:
             tokens_list.append([])
         elif isinstance(t, str) and t.startswith("[") and t.endswith("]"):
             try:
@@ -67,13 +82,16 @@ def load_tokens_from_csv(csv_path, tokens_col="tokens", text_col="utter_clean"):
         else:
             tokens_list.append([])
 
-        # text (utter_clean used for TF-IDF)
+        # text (utter_c1 used for TF-IDF)
         texts.append(row.get(text_col, "") if not pd.isna(row.get(text_col, "")) else "")
     return tokens_list, texts
 
 def load_glove_vectors(glove_path, token_set):
     found = {}
     emb_dim = None
+    if not osp.exists(glove_path):
+        print("Warning: GloVe path does not exist:", glove_path)
+        return found, None
     with open(glove_path, "r", encoding="utf8", errors="ignore") as f:
         for line in tqdm(f, desc="Reading GloVe"):
             parts = line.rstrip().split(" ")
@@ -92,9 +110,12 @@ def load_glove_vectors(glove_path, token_set):
 def load_fasttext_vectors(ft_path, token_set, max_load=None):
     found = {}
     emb_dim = None
+    if not osp.exists(ft_path):
+        print("Warning: FastText path does not exist:", ft_path)
+        return found, None
     with open(ft_path, "r", encoding="utf8", errors="ignore") as f:
         header = f.readline()
-        # if header contains counts, skip it; otherwise rewind
+        # some .vec files have header; if not, rewind
         if len(header.split()) == 2 and header.split()[1].isdigit():
             pass
         else:
@@ -142,14 +163,16 @@ def occurrence_coverage(tokens_lists, found_vecs):
                 covered += 1
     return covered / total if total > 0 else 0.0
 
+# --------------------------
 # TF-IDF helpers
+# --------------------------
 
 def fit_tfidf(train_texts, max_features=20000):
     tfidf = TfidfVectorizer(max_features=max_features, ngram_range=(1,1))
     X = tfidf.fit_transform(train_texts)
     return tfidf, X
 
-def fit_truncated_svd_search(X_sparse, max_n=2048, target_variance=0.80, random_state=42):
+def fit_truncated_svd_search(X_sparse, max_n=1024, target_variance=0.80, random_state=42):
     """
     Fit TruncatedSVD with n_components = max_n to inspect the cumsum curve,
     then find smallest k where cumsum >= target_variance and return k.
@@ -175,22 +198,24 @@ def save_svd(X_sparse, k, out_dir, random_state=42):
     print(f"Refitting TruncatedSVD with n_components={k} ...")
     svd_chosen = TruncatedSVD(n_components=k, random_state=random_state)
     Xr = svd_chosen.fit_transform(X_sparse)
-    out_svd_path = osp.join(out_dir, "tfidf_svd.pkl")
+    out_svd_path = osp.join(out_dir, "tfidf_svd_refit.pkl")
     with open(out_svd_path, "wb") as f:
         pickle.dump(svd_chosen, f)
-    print("Saved SVD to:", out_svd_path)
+    print("Saved refit SVD to:", out_svd_path)
     return svd_chosen, Xr
 
 def transform_and_save_per_row(tfidf, svd, csv_path, out_dir, split_name):
     os.makedirs(out_dir, exist_ok=True)
-    _, texts = load_tokens_from_csv(csv_path)
+    _, texts = load_tokens_from_csv(csv_path, tokens_col=args.tokens_col, text_col=args.text_col)
     X = tfidf.transform(texts)
     Xr = svd.transform(X)
     for i, vec in enumerate(tqdm(Xr, desc=f"Saving TF-IDF reduced for {split_name}")):
         np.save(osp.join(out_dir, f"{split_name}__{i:06d}.npy"), vec.astype("float32"))
     return len(Xr)
 
+# --------------------------
 # Main logic
+# --------------------------
 
 def main(args):
     os.makedirs(args.out_dir, exist_ok=True)
@@ -220,9 +245,7 @@ def main(args):
         # Inspect + choose k
         chosen_k, svd_full = fit_truncated_svd_search(X_train_sparse, max_n=args.max_n, target_variance=args.target_variance, random_state=args.seed)
 
-        # If chosen_k differs from args.n_components, use chosen_k; else use args.n_components
         final_k = int(chosen_k) if chosen_k is not None else int(args.n_components)
-        # Refit SVD at final_k
         svd_chosen, Xr_train = save_svd(X_train_sparse, final_k, args.out_dir, random_state=args.seed)
         summary["tfidf"]["n_components"] = int(final_k)
         summary["tfidf"]["explained_variance"] = float(svd_chosen.explained_variance_ratio_.sum())
@@ -231,7 +254,7 @@ def main(args):
 
         # optionally save per-row reduced vectors for train/val/test
         if args.save_tfidf_npy:
-            out_tfidf_dir = osp.join(args.out_dir, "tfidf_npy")
+            out_tfidf_dir = osp.join(args.out_dir, "tfidf_npy_refit")
             if args.train_csv:
                 cnt = transform_and_save_per_row(tfidf, svd_chosen, args.train_csv, out_tfidf_dir, "train")
                 print("Saved TF-IDF reduced for train:", cnt)
@@ -247,44 +270,56 @@ def main(args):
         print("\nLoading GloVe and building matrix...")
         glove_found, glove_dim = load_glove_vectors(args.glove, token_set)
         if glove_dim is None:
-            raise RuntimeError("GloVe dim could not be inferred. Check the file.")
-        emb_glove, covered_glove = build_embedding_matrix(token_to_idx, glove_found, glove_dim, seed=args.seed)
-        out_glove = osp.join(args.out_dir, f"emb_glove_{glove_dim}d.npy")
-        np.save(out_glove, emb_glove)
-        print("Saved GloVe matrix to:", out_glove)
-        summary["embeddings"]["glove"] = {
-            "path": out_glove,
-            "dim": int(glove_dim),
-            "token_coverage": token_level_coverage(token_to_idx, glove_found),
-            "occurrence_coverage": occurrence_coverage(train_tokens, glove_found),
-            "found_tokens": int(len(glove_found))
-        }
+            print("No GloVe embeddings found for your tokens or glove file missing.")
+        else:
+            emb_glove, covered_glove = build_embedding_matrix(token_to_idx, glove_found, glove_dim, seed=args.seed)
+            out_glove = osp.join(args.out_dir, f"emb_glove_{glove_dim}d.npy")
+            np.save(out_glove, emb_glove)
+            print("Saved GloVe matrix to:", out_glove)
+            summary["embeddings"]["glove"] = {
+                "path": out_glove,
+                "dim": int(glove_dim),
+                "token_coverage": token_level_coverage(token_to_idx, glove_found),
+                "occurrence_coverage": occurrence_coverage(train_tokens, glove_found),
+                "found_tokens": int(len(glove_found))
+            }
 
     # FastText
     if args.fasttext:
         print("\nLoading FastText and building matrix...")
         ft_found, ft_dim = load_fasttext_vectors(args.fasttext, token_set, max_load=args.fasttext_max_load)
         if ft_dim is None:
-            raise RuntimeError("FastText dim could not be inferred. Check the file.")
-        emb_ft, covered_ft = build_embedding_matrix(token_to_idx, ft_found, ft_dim, seed=args.seed)
-        out_ft = osp.join(args.out_dir, f"emb_fasttext_{ft_dim}d.npy")
-        np.save(out_ft, emb_ft)
-        print("Saved FastText matrix to:", out_ft)
-        summary["embeddings"]["fasttext"] = {
-            "path": out_ft,
-            "dim": int(ft_dim),
-            "token_coverage": token_level_coverage(token_to_idx, ft_found),
-            "occurrence_coverage": occurrence_coverage(train_tokens, ft_found),
-            "found_tokens": int(len(ft_found))
-        }
+            print("No FastText embeddings found for your tokens or fasttext file missing.")
+        else:
+            emb_ft, covered_ft = build_embedding_matrix(token_to_idx, ft_found, ft_dim, seed=args.seed)
+            out_ft = osp.join(args.out_dir, f"emb_fasttext_{ft_dim}d.npy")
+            np.save(out_ft, emb_ft)
+            print("Saved FastText matrix to:", out_ft)
+            summary["embeddings"]["fasttext"] = {
+                "path": out_ft,
+                "dim": int(ft_dim),
+                "token_coverage": token_level_coverage(token_to_idx, ft_found),
+                "occurrence_coverage": occurrence_coverage(train_tokens, ft_found),
+                "found_tokens": int(len(ft_found))
+            }
 
+    # save summary + vocab metadata
     out_summary = osp.join(args.out_dir, "representation_summary.json")
     with open(out_summary, "w") as f:
         json.dump(summary, f, indent=2)
+
+    # indicate that vocab does NOT include emotion token
+    meta = {"vocab_includes_emotion": True, "tfidf_features": summary.get("tfidf", {}).get("n_features", None)}
+    with open(osp.join(args.out_dir, "vocab_meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)
+
     print("\nSaved summary:", out_summary)
     print("Done.")
 
 
+# --------------------------
+# Run without CLI
+# --------------------------
 if __name__ == "__main__":
     args = SimpleNamespace(**CONFIG)
 

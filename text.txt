@@ -8,3 +8,10 @@ image preprocessing left
 
 try to subsample using a fixed percentage
 
+
+
+tokenize emotions
+token_c1 already exists as tokenization of utter_c1
+concatenate token_emotions + token_c1
+
+mention which one is best in vlt_history.json
