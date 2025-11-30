@@ -7,8 +7,9 @@ Usage example:
    --vocab data_preprocessed/vocab.pkl \
    --features_dir data_preprocessed/features \
    --images_dir data_preprocessed/images_subset \
-   --out_dir checkpoints/m1 \
-   --epochs 10 --batch_size 16 --embedding_type glove --embedding_dim 300 --freeze_emb
+   --out_dir checkpoints/model1 \
+   --out_dir_final checkpoints/summary \
+   --epochs 3 --batch_size 16 --embedding_type glove --embedding_dim 300 --freeze_emb
 """
 import os
 import os.path as osp
@@ -267,8 +268,9 @@ def main():
     parser.add_argument("--vocab", default="data_preprocessed/vocab.pkl")
     parser.add_argument("--features_dir", default="data_preprocessed/features")
     parser.add_argument("--images_dir", default="data_preprocessed/images_subset")
-    parser.add_argument("--out_dir", default="checkpoints/m1")
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--out_dir", default="checkpoints/model1")
+    parser.add_argument("--out_dir_final", default="checkpoints/summary")
+    parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=16) # 32 was too slow 
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--embed_dim", type=int, default=300)
@@ -282,7 +284,7 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-
+    os.makedirs(args.out_dir_final, exist_ok=True)
     # load vocab
     token_to_idx, idx_to_token = load_vocab(args.vocab)
     vocab_size = len(token_to_idx)
@@ -361,12 +363,24 @@ def main():
 
         if val_loss < best_val:
             best_val = val_loss
+            best_epoch = epoch
+            best_train_loss = train_loss
+            best_val_loss = val_loss
             best_path = osp.join(args.out_dir, f"m1_best_{args.embedding_type}.pt")
             save_checkpoint(ckpt, best_path)
             print("Saved best checkpoint:", best_path)
 
+        # update history with best info
+        history["best"] = {
+            "epoch": best_epoch,
+            "train_loss": best_train_loss,
+            "val_loss": best_val_loss,
+            "checkpoint": best_path
+    }
+
+
         # save history
-        with open(osp.join(args.out_dir, "train_history.json"), "w") as f:
+        with open(osp.join(args.out_dir_final, "cnn_history.json"), "w") as f:
             json.dump(history, f, indent=2)
 
     print("Training finished. Best val loss:", best_val)
