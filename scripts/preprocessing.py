@@ -194,7 +194,7 @@ def main():
     print("\nTokenizing at word level...")
     df['tokens'] = df['utter_clean'].apply(tokenize_word_level)
     df['tokens_c1'] = df['utter_c1'].apply(tokenize_word_level)
-    
+
     #adding min len and max len restriction
     df['tok_len'] = df['tokens'].apply(lambda t: max(0, len(t) - 2))  # remove <start> and <end>
     df = df[(df['tok_len'] >= MIN_LEN) & (df['tok_len'] <= MAX_LEN)].reset_index(drop=True)
@@ -253,6 +253,12 @@ def main():
     for root, _, files in os.walk(FEATURES_OUT):
         n_features_written += sum(1 for f in files if f.lower().endswith(".npy"))
 
+    # Count rows in each split
+    n_train = len(df[df['split'] == 'train'])
+    n_val   = len(df[df['split'] == 'val'])
+    n_test  = len(df[df['split'] == 'test'])
+
+
     summary = {
         "subsample_size": TARGET_SUBSAMPLE,
         "max_len": MAX_LEN,
@@ -260,12 +266,13 @@ def main():
         "vocab_size": len(token_to_idx),
         "normalization": "pixel values in .npy files are in [0,1]",
         "rows_kept": len(df_out),
+        "train_rows": n_train,
+        "val_rows": n_val,
+        "test_rows": n_test,
         "unique_paintings": int(df_out['painting'].nunique()),
-        "images_written_flat_folder": n_images_written,
-        "features_written_flat_folder": n_features_written,
         "emotion_counts": emotion_counts
     }
-    with open(osp.join(OUT_DIR, "summary.json"), "w") as f:
+    with open(osp.join(OUT_DIR, "preprocessing_summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
 
     print("\nDone.")
