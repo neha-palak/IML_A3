@@ -7,7 +7,7 @@ Usage example:
    --vocab data_preprocessed/vocab.pkl \
    --features_dir data_preprocessed/features \
    --images_dir data_preprocessed/images_subset \
-   --out_dir checkpoints/model1 \
+   --out_dir checkpoints/m1_pt \
    --out_dir_final checkpoints/summary \
    --epochs 3 --batch_size 16 --embedding_type glove --embedding_dim 300 --freeze_emb
 """
@@ -86,7 +86,7 @@ class ArtEmisDataset(Dataset):
         self.images_dir = Path(images_dir) if images_dir else None
         self.features_dir = Path(features_dir) if features_dir else None
         self.max_len = max_len
-        self.transform = transform or T.Compose([T.Resize((128,128)), T.ToTensor()])
+        self.transform = transform or T.Compose([T.Resize((224,224)), T.ToTensor()])
         if 'token_ids' not in self.df.columns:
             raise RuntimeError(f"{csv_path} missing 'token_ids' column")
         # parse token ids
@@ -109,7 +109,7 @@ class ArtEmisDataset(Dataset):
             img = Image.open(img_path).convert("RGB")
             return self.transform(img)
         # fallback zeros
-        return torch.zeros(3,128,128, dtype=torch.float32)
+        return torch.zeros(3,224,224, dtype=torch.float32)
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
@@ -268,7 +268,7 @@ def main():
     parser.add_argument("--vocab", default="data_preprocessed/vocab.pkl")
     parser.add_argument("--features_dir", default="data_preprocessed/features")
     parser.add_argument("--images_dir", default="data_preprocessed/images_subset")
-    parser.add_argument("--out_dir", default="checkpoints/model1")
+    parser.add_argument("--out_dir", default="checkpoints/m1_pt")
     parser.add_argument("--out_dir_final", default="checkpoints/summary")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=16) # 32 was too slow 
@@ -277,7 +277,7 @@ def main():
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--feature_dim", type=int, default=256)
     parser.add_argument("--max_len", type=int, default=20)
-    parser.add_argument("--embedding_type", choices=["random","glove","fasttext"], default="glove")
+    parser.add_argument("--embedding_type", choices=["random","glove","fasttext"], default="fasttext")
     parser.add_argument("--freeze_emb", action="store_true", help="If set, freeze pretrained embeddings")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--num_workers", type=int, default=4) 
@@ -316,7 +316,7 @@ def main():
             embedding_weights = None
 
     # create datasets
-    transform = T.Compose([T.Resize((128,128)), T.ToTensor()])
+    transform = T.Compose([T.Resize((224,224)), T.ToTensor()])
     train_ds = ArtEmisDataset(args.train_csv, token_to_idx, images_dir=args.images_dir, features_dir=args.features_dir, max_len=args.max_len, transform=transform)
     val_ds = ArtEmisDataset(args.val_csv, token_to_idx, images_dir=args.images_dir, features_dir=args.features_dir, max_len=args.max_len, transform=transform)
 
@@ -380,8 +380,25 @@ def main():
 
 
         # save history
-        with open(osp.join(args.out_dir_final, "cnn_history.json"), "w") as f:
-            json.dump(history, f, indent=2)
+        # --------------------------------------------
+    # SAVE HISTORY PER EMBEDDING TYPE (DO NOT OVERWRITE)
+    # --------------------------------------------
+    history_path = osp.join(args.out_dir_final, "cnn_history.json")
+
+    # 1. Load existing history file
+    if os.path.exists(history_path):
+        with open(history_path, "r") as f:
+            all_histories = json.load(f)
+    else:
+        all_histories = {}
+
+    # 2. Store this run’s history under its embedding type
+    all_histories[args.embedding_type] = history
+
+    # 3. Save everything back
+    with open(history_path, "w") as f:
+        json.dump(all_histories, f, indent=2)
+
 
     print("Training finished. Best val loss:", best_val)
     print("Final best saved at:", osp.join(args.out_dir, f"m1_best_{args.embedding_type}.pt"))

@@ -119,7 +119,7 @@ def copy_and_resize_images(df):
 
             # resize & save JPG
             img = Image.open(dst).convert("RGB")
-            img = img.resize((128, 128), Image.LANCZOS)
+            img = img.resize((224, 224), Image.LANCZOS)
             img.save(dst)
 
             # save normalized numpy array
@@ -274,6 +274,8 @@ def main():
     }
     with open(osp.join(OUT_DIR, "preprocessing_summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
+
+    
 
     print("\nDone.")
 

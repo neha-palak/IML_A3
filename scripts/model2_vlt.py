@@ -267,7 +267,7 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     ckpt_dir = Path("checkpoints")
-    (ckpt_dir / "model2").mkdir(parents=True, exist_ok=True)
+    (ckpt_dir / "m2_pt").mkdir(parents=True, exist_ok=True)
     (ckpt_dir / "summary").mkdir(exist_ok=True)
 
     summary_path = ckpt_dir / "summary" / "vlt_summary.json"
@@ -309,7 +309,7 @@ if __name__ == "__main__":
             print(f"          val_loss={val_loss:.4f}")
 
         # Save checkpoint
-        ckpt_path = ckpt_dir / "model2" / f"model2_epoch{epoch}.pt"
+        ckpt_path = ckpt_dir / "m2_pt" / f"m2_epoch{epoch}.pt"
         torch.save({
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
@@ -327,7 +327,7 @@ if __name__ == "__main__":
 
         if val_loss is not None and val_loss < best_val:
             best_val = val_loss
-            best_path = ckpt_dir / "model2" / "vlt_best.pt"
+            best_path = ckpt_dir / "m2_pt" / "vlt_best.pt"
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
