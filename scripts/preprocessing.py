@@ -11,7 +11,6 @@ import re
 from math import floor
 from PIL import Image
 import argparse
-from sklearn.preprocessing import LabelEncoder
 
 # FIXED CONFIGURATION
 
@@ -21,12 +20,13 @@ IMAGES_OUT = osp.join(OUT_DIR, "images_subset")
 FEATURES_OUT = osp.join(OUT_DIR, "features") 
 WIKI_ROOT = "wikiart"
 
-TARGET_SUBSAMPLE = 7500
+TARGET_SUBSAMPLE = 5500
 SEED = 42
 
-MAX_LEN = 20  # sequence length
+MAX_LEN = 25
+MIN_LEN = 3
 MAX_VOCAB_SIZE = 8000  
-SPLIT_LOADS = (0.8, 0.1, 0.1)
+SPLIT_LOADS = (0.85, 0.05, 0.1)
 
 # LOWERCASE + BASIC CLEANING BEFORE TOKENIZATION
 
@@ -92,6 +92,7 @@ def split_by_painting(df):
     return df
 
 # IMAGE COPY + RESIZE + NORMALIZE
+
 def copy_and_resize_images(df):
     os.makedirs(IMAGES_OUT, exist_ok=True)
     os.makedirs(FEATURES_OUT, exist_ok=True)
@@ -104,7 +105,7 @@ def copy_and_resize_images(df):
     for style, painting in df[['art_style', 'painting']].drop_duplicates().values:
         src = Path(WIKI_ROOT) / style / f"{painting}.jpg"
 
-        # ---- Flat output ----
+        # Flat output
         dst = Path(IMAGES_OUT) / f"{painting}.jpg"
         feat_path = Path(FEATURES_OUT) / f"{painting}.npy"
 
@@ -162,15 +163,41 @@ def main():
     sampled = stratified_subsample_by_style(df, TARGET_SUBSAMPLE)
     df = df[df['painting'].isin(sampled)].reset_index(drop=True)
 
+    emotions_label = {
+        "amusement": 0,
+        "contentment": 1,
+        "awe": 2,
+        "excitement": 3,
+        "fear": 4,
+        "anger": 5,
+        "sadness": 6,
+        "disgust": 7,
+        "something else": 8
+    }
+    # wanted to drop 'something else' emotion but then decided to keep because it altered number of images being copied
+    # df = df[df['emotion'] != "something else"].reset_index(drop=True)
+    df = df[df['emotion'].isin(emotions_label.keys())].reset_index(drop=True)
+
+    # Map to labels
+    df['emotion_label'] = df['emotion'].map(emotions_label).astype(int)
+
+    emotion_counts = df['emotion'].value_counts().to_dict()
+
     # Copy + normalize images (features saved to FEATURES_OUT)
     copy_and_resize_images(df)
 
     # Clean text before tokenization
-    df['utter_clean'] = df['utterance'].astype(str).apply(clean_text_basic)
+    df['utter_clean'] = df['emotion'] + " " + df['utterance'].astype(str).apply(clean_text_basic)
+    df['utter_c1'] = df['utterance'].astype(str).apply(clean_text_basic)
 
     # Word-level tokenization with <start>/<end>
     print("\nTokenizing at word level...")
     df['tokens'] = df['utter_clean'].apply(tokenize_word_level)
+    df['tokens_c1'] = df['utter_c1'].apply(tokenize_word_level)
+    
+    #adding min len and max len restriction
+    df['tok_len'] = df['tokens'].apply(lambda t: max(0, len(t) - 2))  # remove <start> and <end>
+    df = df[(df['tok_len'] >= MIN_LEN) & (df['tok_len'] <= MAX_LEN)].reset_index(drop=True)
 
     # REDUCE VOCAB TO TOP 8000 TOKENS
     print("\nBuilding reduced vocab...")
@@ -208,23 +235,17 @@ def main():
     # Split
     df = split_by_painting(df)
 
-    label_encoder = LabelEncoder()
-    df['emotion_label'] = label_encoder.fit_transform(df['emotion'])
-
     # Drop requested columns
     drop_cols = ["repetition","split","token_ids_len","utterance"]
     df_out = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
 
-    # Save main CSV
     df_out.to_csv(osp.join(OUT_DIR, "artemis_preprocessed.csv"), index=False)
 
-    # Save splits
     for split in ["train", "val", "test"]:
         part = df[df['split'] == split]
         part_out = part.drop(columns=[c for c in drop_cols if c in part.columns], errors="ignore")
         part_out.to_csv(osp.join(OUT_DIR, f"{split}.csv"), index=False)
 
-    # Summary - include counts for images and features
     n_images_written = 0
     for root, _, files in os.walk(IMAGES_OUT):
         n_images_written += sum(1 for f in files if f.lower().endswith(".jpg"))
@@ -235,12 +256,14 @@ def main():
     summary = {
         "subsample_size": TARGET_SUBSAMPLE,
         "max_len": MAX_LEN,
+        "min_len": MIN_LEN,
         "vocab_size": len(token_to_idx),
         "normalization": "pixel values in .npy files are in [0,1]",
         "rows_kept": len(df_out),
         "unique_paintings": int(df_out['painting'].nunique()),
         "images_written_flat_folder": n_images_written,
-        "features_written_flat_folder": n_features_written
+        "features_written_flat_folder": n_features_written,
+        "emotion_counts": emotion_counts
     }
     with open(osp.join(OUT_DIR, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
