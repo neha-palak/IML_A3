@@ -198,7 +198,7 @@ def save_svd(X_sparse, k, out_dir, random_state=42):
     print(f"Refitting TruncatedSVD with n_components={k} ...")
     svd_chosen = TruncatedSVD(n_components=k, random_state=random_state)
     Xr = svd_chosen.fit_transform(X_sparse)
-    out_svd_path = osp.join(out_dir, "tfidf_svd_refit.pkl")
+    out_svd_path = osp.join(out_dir, "tfidf_svd.pkl")
     with open(out_svd_path, "wb") as f:
         pickle.dump(svd_chosen, f)
     print("Saved refit SVD to:", out_svd_path)
@@ -254,7 +254,7 @@ def main(args):
 
         # optionally save per-row reduced vectors for train/val/test
         if args.save_tfidf_npy:
-            out_tfidf_dir = osp.join(args.out_dir, "tfidf_npy_refit")
+            out_tfidf_dir = osp.join(args.out_dir, "tfidf_npy")
             if args.train_csv:
                 cnt = transform_and_save_per_row(tfidf, svd_chosen, args.train_csv, out_tfidf_dir, "train")
                 print("Saved TF-IDF reduced for train:", cnt)
