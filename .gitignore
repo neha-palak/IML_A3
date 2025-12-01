@@ -8,3 +8,4 @@ checkpoints/m1/
 checkpoints/model1/
 checkpoints/m2/
 checkpoints/model2/
+eval_outputs/model2/
