@@ -1,94 +1,94 @@
-import os
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
+#!/usr/bin/env python3
+"""
+evaluate_m1.py
+
+Loads best checkpoint for Model1 and runs greedy decoding on the test split,
+computes BLEU and ROUGE-L for a subset of images, prints sample predictions.
+"""
+import argparse
+import numpy as np
 from tqdm import tqdm
+import torch
+from torch.utils.data import DataLoader
+from model1_cnn import load_vocab, ArtEmisDataset, collate_fn, CaptionModel  # import from training script
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from rouge_score import rouge_scorer
 
-# Make sure directories exist
-os.makedirs("checkpoints/m1", exist_ok=True)
-
-# Hyperparameters
-HIDDEN_SIZE = 256
-BATCH_SIZE = 32
-LR = 1e-3
-EPOCHS = 10
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+TFIDF_DIR = "data_preprocessed/tfidf_npy"
+TEST_CSV = "data_preprocessed/test.csv"
+FEATURES_DIR = "data_preprocessed/features"
+VOCAB_PATH = "data_preprocessed/vocab.pkl"
+MAX_SEQ_LEN = 25
 
-# Assuming your dataset class returns:
-# img: [3,H,W], tokens: [seq_len], emo: int, tfidf: [tfidf_dim]
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
+def evaluate(checkpoint_path, embedding, max_samples=200):
+    device = torch.device(DEVICE)
+    ckpt = torch.load(checkpoint_path, map_location=device)
+    config = ckpt.get("config", {})
+    tfidf_dim = config.get("tfidf_dim", 0)
 
-# Instantiate models
-encoder = CNNEncoder().to(DEVICE)  # your custom CNN returning [batch, 256]
-decoder = LSTMDecoder(emb_matrix, HIDDEN_SIZE, VOCAB_SIZE, tfidf_dim=512 if EMBED_TYPE=="tfidf" else None).to(DEVICE)
+    vocab = load_vocab(VOCAB_PATH)
+    idx2tok = {v: k for k, v in vocab.items()}
+    pad_idx = vocab.get("<pad>", 0)
+    sos_idx = vocab.get("<start>", 1)
+    eos_idx = vocab.get("<end>", None)
 
-criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
-optimizer = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=LR)
+    model = CaptionModel(
+        vocab_size=len(vocab),
+        embedding_type=embedding,
+        embedding_matrix_path=None if embedding not in ("glove","fasttext") else ("data_preprocessed/emb_glove_300d.npy" if embedding=="glove" else "data_preprocessed/emb_fasttext_300d.npy"),
+        tfidf_dim=tfidf_dim if tfidf_dim>0 else None,
+        embed_dim=config.get("embed_dim", 300),
+        image_feat_dim=256,
+        emo_dim=config.get("emo_dim", 64),
+        lstm_hidden=config.get("lstm_hidden", 256),
+        num_emotions=config.get("num_emotions", 9)
+    ).to(device)
+    model.load_state_dict(ckpt["model_state"])
+    model.eval()
 
-train_losses = []
-val_losses = []
+    test_ds = ArtEmisDataset(TEST_CSV, FEATURES_DIR, "test", use_tfidf=(embedding=="tfidf"), tfidf_dir=TFIDF_DIR, max_len=MAX_SEQ_LEN)
+    test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
-for epoch in range(1, EPOCHS+1):
-    encoder.train()
-    decoder.train()
-    total_loss = 0
+    bleu_smooth = SmoothingFunction().method1
+    rouge = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
 
-    for img, tokens, emo, tfidf_feat in tqdm(train_loader, desc=f"Epoch {epoch}"):
-        img = img.to(DEVICE)
-        tokens = tokens.to(DEVICE)
-        emo = emo.to(DEVICE)
-        if tfidf_feat is not None:
-            tfidf_feat = tfidf_feat.to(DEVICE)
+    bleu_scores = []
+    rouge_scores = []
+    for i, (imgs, toks, emos, tfidf) in enumerate(tqdm(test_loader, total=min(len(test_ds), max_samples))):
+        if i >= max_samples:
+            break
+        imgs = imgs[0]
+        emo_id = int(emos[0].item())
+        tfidf_vec = tfidf[0] if tfidf is not None else None
 
-        optimizer.zero_grad()
-        img_feat = encoder(img)  # [batch, 256]
+        pred_ids = model.greedy_decode(imgs, emo_id, sos_idx, eos_idx=eos_idx, max_len=MAX_SEQ_LEN, tfidf_vec=(tfidf_vec if embedding=="tfidf" else None), device=device)
+        pred_tokens = [idx2tok.get(int(x), "<unk>") for x in pred_ids]
+        ref_ids = toks[0].tolist()
+        ref_tokens = [idx2tok.get(int(x), "<unk>") for x in ref_ids if x not in (pad_idx, sos_idx, eos_idx)]
 
-        # Forward pass
-        out = decoder(tokens[:, :-1], img_feat, emo, tfidf_feat)  # predict next word
-        # tokens[:, 1:] = target sequence
-        loss = criterion(out.reshape(-1, VOCAB_SIZE), tokens[:, 1:].reshape(-1))
-        loss.backward()
-        optimizer.step()
+        try:
+            bleu = sentence_bleu([ref_tokens], pred_tokens, smoothing_function=bleu_smooth)
+        except Exception:
+            bleu = 0.0
+        rouge_l = rouge.score(" ".join(ref_tokens), " ".join(pred_tokens))['rougeL'].fmeasure
 
-        total_loss += loss.item()
+        bleu_scores.append(bleu)
+        rouge_scores.append(rouge_l)
 
-    avg_train_loss = total_loss / len(train_loader)
-    train_losses.append(avg_train_loss)
+        if i < 5:
+            print("\nSample", i)
+            print("Ref :", " ".join(ref_tokens))
+            print("Pred:", " ".join(pred_tokens))
 
-    # Validation
-    encoder.eval()
-    decoder.eval()
-    val_loss_total = 0
-    with torch.no_grad():
-        for img, tokens, emo, tfidf_feat in val_loader:
-            img = img.to(DEVICE)
-            tokens = tokens.to(DEVICE)
-            emo = emo.to(DEVICE)
-            if tfidf_feat is not None:
-                tfidf_feat = tfidf_feat.to(DEVICE)
+    print("\nAverage BLEU:", float(np.mean(bleu_scores)) if bleu_scores else 0.0)
+    print("Average ROUGE-L:", float(np.mean(rouge_scores)) if rouge_scores else 0.0)
 
-            img_feat = encoder(img)
-            out = decoder(tokens[:, :-1], img_feat, emo, tfidf_feat)
-            loss = criterion(out.reshape(-1, VOCAB_SIZE), tokens[:, 1:].reshape(-1))
-            val_loss_total += loss.item()
 
-    avg_val_loss = val_loss_total / len(val_loader)
-    val_losses.append(avg_val_loss)
-
-    print(f"Epoch {epoch}: Train Loss = {avg_train_loss:.4f}, Val Loss = {avg_val_loss:.4f}")
-
-    # Save checkpoint
-    torch.save({
-        "epoch": epoch,
-        "encoder_state_dict": encoder.state_dict(),
-        "decoder_state_dict": decoder.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "train_losses": train_losses,
-        "val_losses": val_losses
-    }, f"checkpoints/m1/epoch_{epoch}.pt")
-
-# Save all losses to a JSON for easy plotting later
-import json
-with open("checkpoints/m1/losses.json", "w") as f:
-    json.dump({"train": train_losses, "val": val_losses}, f)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint (m1_best.pt)")
+    parser.add_argument("--embedding", choices=["glove", "fasttext", "tfidf", "trainable"], default="glove")
+    parser.add_argument("--max_samples", type=int, default=200)
+    args = parser.parse_args()
+    evaluate(args.checkpoint, args.embedding, max_samples=args.max_samples)

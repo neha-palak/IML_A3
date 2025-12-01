@@ -4,3 +4,6 @@ data_preprocessed/
 raw_data/
 checkpoints/m1_pt/
 checkpoints/m2_pt/
+checkpoints/m1/
+checkpoints/model1/
+
