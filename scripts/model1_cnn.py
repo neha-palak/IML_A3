@@ -594,7 +594,7 @@ def evaluate_quick(checkpoint_path, embedding, max_samples=20):
 # -----------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--embedding", choices=["glove", "fasttext", "tfidf", "trainable"], default="glove",
+    parser.add_argument("--embedding", choices=["glove", "fasttext", "tfidf", "trainable"], default="tfidf",
                         help="Word representation choice.")
     parser.add_argument("--embed_dim", type=int, default=300)
     parser.add_argument("--lstm_hidden", type=int, default=256)
