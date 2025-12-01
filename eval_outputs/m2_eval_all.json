@@ -1,0 +1,46 @@
+{
+  "random": {
+    "checkpoint": "checkpoints/model2/m2_best_random.pt",
+    "n_examples": 1381,
+    "loss": 4.156023468857309,
+    "perplexity": 63.81724609923881,
+    "token_accuracy": 0.31893655821096073,
+    "BLEU": 0.018381505576139996,
+    "ROUGE-L": 0.22427598349967948,
+    "CIDEr": null,
+    "samples_csv": "eval_outputs/m2_random_samples.csv"
+  },
+  "glove": {
+    "checkpoint": "checkpoints/model2/m2_best_glove.pt",
+    "n_examples": 1381,
+    "loss": 6.517688058581066,
+    "perplexity": 677.0113639931473,
+    "token_accuracy": 0.15169402053939918,
+    "BLEU": 0.000429060472885102,
+    "ROUGE-L": 0.14980611175270628,
+    "CIDEr": null,
+    "samples_csv": "eval_outputs/m2_glove_samples.csv"
+  },
+  "fasttext": {
+    "checkpoint": "checkpoints/model2/m2_best_fasttext.pt",
+    "n_examples": 1381,
+    "loss": 6.027529384328523,
+    "perplexity": 414.6892250214783,
+    "token_accuracy": 0.12726749208177368,
+    "BLEU": 0.0003950130414863444,
+    "ROUGE-L": 0.15881817569001883,
+    "CIDEr": null,
+    "samples_csv": "eval_outputs/m2_fasttext_samples.csv"
+  },
+  "tfidf": {
+    "checkpoint": "checkpoints/model2/m2_best_tfidf.pt",
+    "n_examples": 1381,
+    "loss": 4.346055085722905,
+    "perplexity": 77.17341911214612,
+    "token_accuracy": 0.2691717055379595,
+    "BLEU": 0.008230226535203325,
+    "ROUGE-L": 0.17810132778401772,
+    "CIDEr": null,
+    "samples_csv": "eval_outputs/m2_tfidf_samples.csv"
+  }
+}
