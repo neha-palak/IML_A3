@@ -1,87 +1,77 @@
 #!/usr/bin/env python3
-# scripts/predict.py
 """
-Predict captions using trained VLT and/or CNN+LSTM models.
-Supports:
- - sampling random rows from val.csv (--sample-from-val)
- - painting names that map to data_preprocessed/features/<painting>.npy
- - explicit .npy paths passed in --inputs
- - emotion strings or numeric ids
- - saves JSON predictions to out-dir
-"""
+predict.py
 
-import os
-import json
-import time
+Generate captions from one or more Vision-Language Transformer checkpoints (one per embedding type)
+and a single CNN-LSTM checkpoint. Output JSON like:
+
+[
+  {"input":"painting-name","emotion":4,"generations":{"vlt_glove":"...","vlt_fasttext":"...","cnn":"..."}},
+  ...
+]
+
+Usage examples:
+
+# provide painting names and emotions directly:
+python scripts/predict.py --inputs "pierre-puvis-de-chavannes_the-beheading-of-st-john-the-baptist-1869,jacob-jordaens_the-childhood-of-zeus" \
+    --emotions "4,4" \
+    --features-root data_preprocessed/features \
+    --vocab data_preprocessed/vocab.pkl \
+    --out preds.json
+
+# or rely on found checkpoints and pass a list-file (json lines or simple CSV):
+python scripts/predict.py --inputs-file examples_to_run.jsonl --features-root data_preprocessed/features \
+    --vocab data_preprocessed/vocab.pkl --out preds.json --beam-width 3
+
+"""
 import argparse
-import datetime
+import json
+import math
+import os
 from pathlib import Path
-from typing import List, Tuple, Optional
+from types import SimpleNamespace
+import pickle
+import glob
+import sys
+from typing import List, Tuple, Dict
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import pickle
 
-# -------------------------
-# Config / defaults
-# -------------------------
-DEFAULT_FEATURES_ROOT = "data_preprocessed/features"
-DEFAULT_VOCAB = "data_preprocessed/vocab.pkl"
-DEFAULT_VAL_CSV = "data_preprocessed/val.csv"
-DEFAULT_OUT_DIR = "eval_outputs"
-
-# -------------------------
-# Basic utils
-# -------------------------
-def load_vocab(path):
-    with open(path, "rb") as f:
-        token_to_idx = pickle.load(f)
-    # accept object with token_to_idx
-    if not isinstance(token_to_idx, dict) and hasattr(token_to_idx, "token_to_idx"):
-        token_to_idx = token_to_idx.token_to_idx
-    idx_to_token = {i: t for t, i in token_to_idx.items()}
-    return token_to_idx, idx_to_token
-
-def map_emotion_str_to_id(e_str):
-    em = {
-        "amusement": 0, "contentment": 1, "awe": 2, "excitement": 3,
-        "fear": 4, "anger": 5, "sadness": 6, "disgust": 7, "something else": 8
-    }
-    return em.get(e_str.lower(), 8)
-
-def load_feature_by_name_or_path(name_or_path: str, features_root: str):
-    p = Path(name_or_path)
-    if p.suffix == ".npy" and p.exists():
-        arr = np.load(p)
+# ----------------------------
+# Utilities (vocab + token helpers)
+# ----------------------------
+def load_vocab(vocab_path: str):
+    with open(vocab_path, "rb") as f:
+        obj = pickle.load(f)
+    if isinstance(obj, dict):
+        token_to_idx = obj
+    elif hasattr(obj, "token_to_idx"):
+        token_to_idx = obj.token_to_idx
     else:
-        # try features_root/<name>.npy
-        cand = Path(features_root) / (name_or_path + ".npy")
-        if cand.exists():
-            arr = np.load(cand)
+        # try to coerce list->dict
+        if isinstance(obj, (list, tuple)):
+            token_to_idx = {t: i for i, t in enumerate(obj)}
         else:
-            raise FileNotFoundError(f"Feature file not found for '{name_or_path}'. Tried: {cand}")
-    # ensure shape (H,W,C) -> convert to (C,H,W)
-    if arr.ndim == 3:
-        if arr.shape[2] <= 4:
-            # H,W,C -> C,H,W
-            arr = arr.transpose(2, 0, 1)
-        else:
-            # maybe already C,H,W
-            arr = arr
-    elif arr.ndim == 4 and arr.shape[0] == 1:
-        arr = arr[0]
-    else:
-        raise RuntimeError(f"Unsupported feature ndim {arr.ndim} for {name_or_path}")
-    return torch.tensor(arr).float()
+            raise RuntimeError("Unsupported vocab.pkl format")
+    idx2token = {i: t for t, i in token_to_idx.items()}
+    # find pad/sos/eos defaults
+    def _find(keys, default):
+        for k in keys:
+            if k in token_to_idx:
+                return token_to_idx[k]
+        return default
+    pad_idx = _find(["<pad>", "<PAD>", "[PAD]"], 0)
+    sos_idx = _find(["<start>", "<s>", "<START>"], 1)
+    eos_idx = _find(["<end>", "</s>", "<END>"], 2)
+    return token_to_idx, idx2token, pad_idx, sos_idx, eos_idx
 
-# -------------------------
-# Fallback model implementations (compact)
-# -------------------------
-# Vision-Language Transformer (compact variant similar to training script)
+# ----------------------------
+# Minimal Vision-Language Transformer (compatible with training script)
+# ----------------------------
 def sinusoidal_positional_encoding(n_pos: int, d_model: int):
-    import math
     pe = torch.zeros(n_pos, d_model)
     position = torch.arange(0, n_pos, dtype=torch.float).unsqueeze(1)
     div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
@@ -94,20 +84,21 @@ class PatchEmbed(nn.Module):
         super().__init__()
         assert img_size % patch_size == 0
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.num_patches = (img_size // patch_size) ** 2
     def forward(self, x):
-        x = self.proj(x)               # (B, E, H', W')
-        B, E, Hn, Wn = x.shape
-        return x.flatten(2).transpose(1, 2)  # (B, N, E)
+        x = self.proj(x)
+        B, D, H, W = x.shape
+        return x.flatten(2).transpose(1, 2)
 
 class VisionTransformerEncoder(nn.Module):
     def __init__(self, img_size=224, patch_size=32, embed_dim=256, depth=2, num_heads=4, dropout=0.1):
         super().__init__()
         self.patch_embed = PatchEmbed(img_size, patch_size, 3, embed_dim)
-        P = (img_size // patch_size) ** 2
+        P = self.patch_embed.num_patches
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         pos = sinusoidal_positional_encoding(P + 1, embed_dim)
         self.pos_embed = nn.Parameter(pos, requires_grad=False)
-        layer = nn.TransformerEncoderLayer(embed_dim, num_heads, dim_feedforward=embed_dim*4, dropout=dropout)
+        layer = nn.TransformerEncoderLayer(embed_dim, num_heads, dim_feedforward=embed_dim * 4, dropout=dropout)
         self.encoder = nn.TransformerEncoder(layer, depth)
         self.norm = nn.LayerNorm(embed_dim)
     def forward(self, x):
@@ -121,8 +112,7 @@ class VisionTransformerEncoder(nn.Module):
         x = x + pos
         x = x.transpose(0,1)
         x = self.encoder(x)
-        x = self.norm(x.transpose(0,1))
-        return x
+        return self.norm(x.transpose(0,1))
 
 class DecoderLayerCustom(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward=1024, dropout=0.1):
@@ -148,7 +138,7 @@ class DecoderLayerCustom(nn.Module):
 class TransformerDecoderCustom(nn.Module):
     def __init__(self, layer, num_layers):
         super().__init__()
-        self.layers = nn.ModuleList([layer] + [type(layer)(layer.self_attn.embed_dim, layer.self_attn.num_heads, layer.linear1.out_features, layer.dropout.p) for _ in range(num_layers-1)])
+        self.layers = nn.ModuleList([layer] + [type(layer)(layer.self_attn.embed_dim, layer.self_attn.num_heads, layer.linear1.out_features, layer.dropout.p) for _ in range(num_layers - 1)])
     def forward(self, tgt, memory, tgt_mask=None):
         out = tgt
         for layer in self.layers:
@@ -156,294 +146,382 @@ class TransformerDecoderCustom(nn.Module):
         return out
 
 class VisionLanguageTransformer(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg: dict, token_embedding_weights=None, num_emotions=9):
         super().__init__()
-        D_enc = cfg.get("vit_embed_dim", cfg.get("vit_embed", 256))
-        D_dec = cfg.get("decoder_embed_dim", cfg.get("decoder_embed", 256))
-        self.encoder = VisionTransformerEncoder(img_size=cfg.get("image_size",224),
-                                                patch_size=cfg.get("patch_size",32),
-                                                embed_dim=D_enc,
-                                                depth=cfg.get("vit_depth",2),
-                                                num_heads=cfg.get("vit_num_heads",4),
-                                                dropout=cfg.get("dropout",0.1))
+        D_enc = cfg.get("vit_embed_dim", cfg.get("vit_dim", 256))
+        D_dec = cfg.get("decoder_embed_dim", cfg.get("decoder_dim", 256))
+        self.encoder = VisionTransformerEncoder(img_size=cfg.get("image_size",224), patch_size=cfg.get("patch_size",32),
+                                                embed_dim=D_enc, depth=cfg.get("vit_depth",2), num_heads=cfg.get("vit_num_heads",4), dropout=cfg.get("dropout",0.1))
         self.token_embed = nn.Embedding(cfg["vocab_size"], D_dec)
-        pos_tokens = sinusoidal_positional_encoding(cfg.get("max_seq_len",20)+1, D_dec)
+        if token_embedding_weights is not None:
+            w = torch.tensor(token_embedding_weights, dtype=torch.float32)
+            if w.shape == (cfg["vocab_size"], w.shape[1]) and w.shape[1] == D_dec:
+                self.token_embed.weight.data.copy_(w)
+        pos_tokens = sinusoidal_positional_encoding(cfg.get("max_seq_len",20) + 1, D_dec)
         self.pos_embed_tokens = nn.Parameter(pos_tokens, requires_grad=False)
-        self.enc_to_dec = nn.Linear(D_enc, D_dec) if D_enc != D_dec else nn.Identity()
-        self.emotion_emb = nn.Embedding(cfg.get("num_emotions",9), D_dec)
+        if D_enc != D_dec:
+            self.enc_to_dec = nn.Linear(D_enc, D_dec)
+        else:
+            self.enc_to_dec = nn.Identity()
+        self.emotion_emb = nn.Embedding(num_emotions, D_dec)
         nn.init.xavier_uniform_(self.emotion_emb.weight)
-        layer = DecoderLayerCustom(D_dec, cfg.get("decoder_num_heads",4), dim_feedforward=D_dec*4, dropout=cfg.get("dropout",0.1))
+        layer = DecoderLayerCustom(D_dec, cfg.get("decoder_num_heads",4), dim_feedforward=D_dec * 4, dropout=cfg.get("dropout",0.1))
         self.decoder = TransformerDecoderCustom(layer, cfg.get("decoder_depth",2))
         self.output_proj = nn.Linear(D_dec, cfg["vocab_size"])
-        self.pad_idx = 0
     def forward(self, images, token_ids, emo_ids):
         B, T = token_ids.shape
+        device = images.device
         enc = self.encoder(images)
         enc = self.enc_to_dec(enc)
         memory = enc.transpose(0,1)
         tok_emb = self.token_embed(token_ids)
         emo_vec = self.emotion_emb(emo_ids).unsqueeze(1)
         dec_in = torch.cat([emo_vec, tok_emb], dim=1)
-        pos = self.pos_embed_tokens[:(T+1),:].unsqueeze(0).to(images.device)
+        pos = self.pos_embed_tokens[: dec_in.size(1), :].unsqueeze(0).to(device)
         dec_in = dec_in + pos
         dec_in = dec_in.transpose(0,1)
-        tgt_mask = torch.triu(torch.ones((T+1, T+1), device=images.device), diagonal=1).bool()
+        tgt_mask = torch.triu(torch.ones((dec_in.size(0), dec_in.size(0)), device=device), diagonal=1).bool()
         dec_out = self.decoder(dec_in, memory, tgt_mask=tgt_mask)
         dec_out = dec_out.transpose(0,1)
         logits = self.output_proj(dec_out)
-        return logits[:,1:,:]   # skip emotion position
+        return logits[:, 1:, :]
 
     def greedy_decode(self, image, emo_id, sos_idx, eos_idx=None, max_len=None, device='cpu'):
         self.eval()
-        if max_len is None: max_len = self.pos_embed_tokens.size(0)-1
+        if max_len is None:
+            max_len = 20
         if image.ndim == 3:
             image = image.unsqueeze(0)
         image = image.to(device)
+        emo = torch.tensor([emo_id], dtype=torch.long).to(device)
         with torch.no_grad():
             enc = self.encoder(image)
             enc = self.enc_to_dec(enc)
             memory = enc.transpose(0,1)
             cur = torch.LongTensor([[sos_idx]]).to(device)
+            generated = []
             for step in range(max_len):
-                cur_padded = F.pad(cur, (0, max_len - cur.size(1)), value=0)
-                logits = self.forward(image, cur_padded, torch.LongTensor([emo_id]).to(device))
-                step_idx = cur.size(1)-1
-                logit_step = logits[:, step_idx, :]
-                next_id = torch.argmax(logit_step, dim=-1).item()
+                tok_emb = self.token_embed(cur)
+                emo_emb = self.emotion_emb(emo).unsqueeze(1)
+                dec_in = torch.cat([emo_emb, tok_emb], dim=1)
+                pos = self.pos_embed_tokens[: dec_in.size(1), :].unsqueeze(0).to(device)
+                dec_in = (dec_in + pos).transpose(0,1)
+                tgt_mask = torch.triu(torch.ones((dec_in.size(0), dec_in.size(0)), device=device), diagonal=1).bool()
+                dec_out = self.decoder(dec_in, memory, tgt_mask=tgt_mask).transpose(0,1)
+                logits_next = self.output_proj(dec_out[:, -1, :])
+                next_id = int(torch.argmax(logits_next, dim=-1).item())
+                generated.append(next_id)
                 if eos_idx is not None and next_id == eos_idx:
-                    return cur.squeeze().tolist()[1:]  # exclude sos
+                    break
                 cur = torch.cat([cur, torch.LongTensor([[next_id]]).to(device)], dim=1)
-            return cur.squeeze().tolist()[1:]
+        return generated
 
-# Simple CNN + LSTM fallback
-class SimpleCNNEncoder(nn.Module):
+# ----------------------------
+# Minimal CNN + LSTM fallback
+# ----------------------------
+class SmallCNNEncoder(nn.Module):
     def __init__(self, out_dim=256):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(3,32,3,padding=1), nn.ReLU(), nn.MaxPool2d(2),
             nn.Conv2d(32,64,3,padding=1), nn.ReLU(), nn.MaxPool2d(2),
             nn.Conv2d(64,128,3,padding=1), nn.ReLU(), nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(), nn.Linear(128, out_dim)
+            nn.Flatten(),
+            nn.Linear(128, out_dim),
+            nn.ReLU()
         )
-    def forward(self,x): return self.net(x)
+    def forward(self,x):
+        return self.net(x)
 
-class CNNLSTM(nn.Module):
+class CNN_LSTM(nn.Module):
     def __init__(self, cfg):
         super().__init__()
-        img_feat_dim = cfg.get("img_feat_dim", 256)
-        self.encoder = SimpleCNNEncoder(out_dim=img_feat_dim)
-        emb_dim = cfg.get("emb_dim", 256)
-        self.token_embed = nn.Embedding(cfg["vocab_size"], emb_dim)
-        self.emotion_emb = nn.Embedding(cfg.get("num_emotions",9), emb_dim)
-        self.lstm = nn.LSTM(emb_dim, cfg.get("lstm_hidden",256), batch_first=True)
+        self.encoder = SmallCNNEncoder(out_dim=cfg.get("img_feat_dim",256))
+        self.embed = nn.Embedding(cfg["vocab_size"], cfg.get("dec_embed_dim",256))
+        self.lstm = nn.LSTM(cfg.get("dec_embed_dim",256) + cfg.get("img_feat_dim",256), cfg.get("lstm_hidden",256), batch_first=True)
         self.out = nn.Linear(cfg.get("lstm_hidden",256), cfg["vocab_size"])
-    def forward(self, images, token_ids, emo_ids):
+    def forward(self, images, token_ids, emo_ids=None):
+        # token_ids (B,T), returns logits (B,T,V)
         B,T = token_ids.shape
-        img_feat = self.encoder(images).unsqueeze(1)  # (B,1,F)
-        tok_emb = self.token_embed(token_ids)         # (B,T,emb)
-        emo_vec = self.emotion_emb(emo_ids).unsqueeze(1)
-        # prepend emotion and image feature by concatenation-per-time-step trick:
-        # We'll prepend a single step representing [EMO] (embedding) and let LSTM consume
-        inp = torch.cat([emo_vec, tok_emb], dim=1)  # (B, T+1, emb)
-        out, _ = self.lstm(inp)
-        logits = self.out(out)  # (B, T+1, V)
-        return logits[:,1:,:]
-
+        img_feat = self.encoder(images)  # (B, feat)
+        emb = self.embed(token_ids)      # (B,T,emb)
+        # repeat img_feat across time and concat
+        img_rep = img_feat.unsqueeze(1).expand(-1, T, -1)
+        inp = torch.cat([emb, img_rep], dim=-1)
+        out,_ = self.lstm(inp)
+        logits = self.out(out)
+        return logits
     def greedy_decode(self, image, emo_id, sos_idx, eos_idx=None, max_len=20, device='cpu'):
         self.eval()
-        if image.ndim == 3: image = image.unsqueeze(0)
+        if image.ndim == 3:
+            image = image.unsqueeze(0)
         image = image.to(device)
         with torch.no_grad():
-            img_feat = self.encoder(image)  # (1, F)
-            cur = [sos_idx]
-            generated = []
+            feat = self.encoder(image)  # (1,feat)
+            cur = torch.LongTensor([[sos_idx]]).to(device)
             hidden = None
+            generated = []
             for step in range(max_len):
-                cur_t = torch.LongTensor([cur]).to(device)  # (1, L)
-                tok_emb = self.token_embed(cur_t)           # (1,L,emb)
-                emo_vec = self.emotion_emb(torch.LongTensor([emo_id]).to(device)).unsqueeze(1)
-                inp = torch.cat([emo_vec, tok_emb], dim=1)
+                emb = self.embed(cur)  # (1,t,emb)
+                # take last token embedding
+                last_emb = emb[:,-1:,:]
+                inp = torch.cat([last_emb, feat.unsqueeze(1)], dim=-1)
                 out, hidden = self.lstm(inp, hidden)
-                logit = self.out(out[:, -1, :])
-                next_id = torch.argmax(logit, dim=-1).item()
+                logits_next = self.out(out[:, -1, :])
+                next_id = int(torch.argmax(logits_next, dim=-1).item())
+                generated.append(next_id)
                 if eos_idx is not None and next_id == eos_idx:
                     break
-                generated.append(next_id)
-                cur.append(next_id)
-            return generated
+                cur = torch.cat([cur, torch.LongTensor([[next_id]]).to(device)], dim=1)
+        return generated
 
-# -------------------------
-# Checkpoint loading helper
-# -------------------------
-def load_checkpoint_maybe_build(path: str, device: str, model_type: str, vocab_size: int):
-    """
-    Try to load checkpoint and instantiate an appropriate model using stored config (if exists).
-    model_type: "vlt" or "cnn"
-    """
-    ck = torch.load(path, map_location=device)
-    # many checkpoints saved as dict; handle
-    if isinstance(ck, dict) and "model_state_dict" in ck and "config" in ck:
-        cfg = ck["config"]
-        # ensure vocab_size present
-        cfg["vocab_size"] = vocab_size
-        if model_type == "vlt":
-            model = VisionLanguageTransformer(cfg)
-        else:
-            model = CNNLSTM(cfg)
-        model.load_state_dict(ck["model_state_dict"], strict=False)
-        model.to(device)
-        model.eval()
-        return model, ck
+# ----------------------------
+# Checkpoint loader helpers
+# ----------------------------
+def discover_vlt_ckpts(provided_list: List[str]) -> List[str]:
+    if provided_list:
+        return provided_list
+    # search for files that look like vlt best checkpoints
+    candidates = glob.glob("checkpoints/**/m2_best*.pt", recursive=True) + glob.glob("checkpoints/**/m2_*best*.pt", recursive=True)
+    candidates = sorted(list(set(candidates)))
+    return candidates
+
+def discover_cnn_ckpt(provided: str):
+    if provided:
+        return provided
+    candidates = glob.glob("checkpoints/**/cnn_best*.pt", recursive=True) + glob.glob("checkpoints/**/m1_best*.pt", recursive=True)
+    candidates = sorted(list(set(candidates)))
+    return candidates[0] if candidates else None
+
+def load_checkpoint_into_vlt(ckpt_path, device, vocab_size):
+    try:
+        ck = torch.load(ckpt_path, map_location=device)
+    except Exception as e:
+        print("Could not load checkpoint:", ckpt_path, e)
+        return None, None
+    # extract config if present
+    cfg = ck.get("config", {})
+    if not cfg:
+        # fallback defaults and set vocab_size
+        cfg = {
+            "image_size": 224,
+            "patch_size": 32,
+            "vit_embed_dim": 256,
+            "vit_depth": 2,
+            "vit_num_heads": 4,
+            "decoder_embed_dim": 256,
+            "decoder_depth": 2,
+            "decoder_num_heads": 4,
+            "vocab_size": vocab_size,
+            "max_seq_len": 20,
+            "dropout": 0.1
+        }
     else:
-        # fallback: try to directly load state_dict into local model constructed from minimal cfg
-        print("Checkpoint missing structured dict with config; trying fallback instantiate.")
-        if model_type == "vlt":
-            cfg = {"vocab_size": vocab_size, "max_seq_len": 20, "decoder_embed_dim":256, "vit_embed_dim":256, "decoder_num_heads":4, "decoder_depth":2}
-            model = VisionLanguageTransformer(cfg)
-        else:
-            cfg = {"vocab_size": vocab_size, "lstm_hidden":256, "emb_dim":256, "num_emotions":9}
-            model = CNNLSTM(cfg)
+        cfg = dict(cfg)
+        cfg["vocab_size"] = vocab_size
+    model = VisionLanguageTransformer(cfg, token_embedding_weights=None, num_emotions=cfg.get("num_emotions",9))
+    model.to(device)
+    state = ck.get("model_state_dict", ck)
+    try:
+        model.load_state_dict(state, strict=False)
+        print("Loaded VLT checkpoint into fallback model:", ckpt_path)
+    except Exception as e:
+        print("Warning: loading with strict=False produced errors for", ckpt_path, e)
         try:
-            if isinstance(ck, dict):
-                model.load_state_dict(ck, strict=False)
-            else:
-                model.load_state_dict(ck, strict=False)
-            model.to(device)
-            model.eval()
-            return model, {"loaded_raw": True}
-        except Exception as e:
-            raise RuntimeError(f"Failed to load checkpoint into fallback model: {e}")
+            model.load_state_dict(state, strict=False)
+        except Exception:
+            pass
+    model.eval()
+    return model, cfg
 
-# -------------------------
-# Main predict flow
-# -------------------------
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--inputs", nargs="+", help="painting names (no .npy) OR full paths to .npy files", default=[])
-    p.add_argument("--emotions", nargs="+", help="emotion strings or numeric ids", default=[])
-    p.add_argument("--sample-from-val", action="store_true")
-    p.add_argument("--num-samples", type=int, default=1)
-    p.add_argument("--val-csv", type=str, default=DEFAULT_VAL_CSV)
-    p.add_argument("--features-root", type=str, default=DEFAULT_FEATURES_ROOT)
-    p.add_argument("--vlt-ckpt", type=str, default=None)
-    p.add_argument("--cnn-ckpt", type=str, default=None)
-    p.add_argument("--vocab", type=str, default=DEFAULT_VOCAB)
-    p.add_argument("--device", type=str, default="cpu")
-    p.add_argument("--out-dir", type=str, default=DEFAULT_OUT_DIR)
-    p.add_argument("--max-len", type=int, default=20)
-    return p.parse_args()
+def load_checkpoint_into_cnn(ckpt_path, device, vocab_size):
+    try:
+        ck = torch.load(ckpt_path, map_location=device)
+    except Exception as e:
+        print("Could not load CNN checkpoint:", ckpt_path, e)
+        return None, None
+    cfg = ck.get("config", {})
+    if not cfg:
+        cfg = {"vocab_size": vocab_size, "img_feat_dim":256, "dec_embed_dim":256, "lstm_hidden":256}
+    else:
+        cfg = dict(cfg)
+        cfg["vocab_size"] = vocab_size
+    model = CNN_LSTM(cfg)
+    model.to(device)
+    state = ck.get("model_state_dict", ck)
+    try:
+        model.load_state_dict(state, strict=False)
+        print("Loaded CNN checkpoint:", ckpt_path)
+    except Exception as e:
+        print("Warning: loading CNN with strict=False produced errors", e)
+    model.eval()
+    return model, cfg
 
+# ----------------------------
+# IO helpers to read inputs
+# ----------------------------
+def read_inputs(args) -> List[Tuple[str,int]]:
+    pairs = []
+    if args.inputs_file:
+        p = Path(args.inputs_file)
+        if not p.exists():
+            raise FileNotFoundError(args.inputs_file)
+        # accept jsonl of {"input":..., "emotion":int} or CSV with two cols
+        try:
+            for line in p.open():
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                if isinstance(obj, dict) and "input" in obj and "emotion" in obj:
+                    pairs.append((obj["input"], int(obj["emotion"])))
+                else:
+                    # fallback to tuple-like arrays
+                    if isinstance(obj, (list,tuple)) and len(obj) >= 2:
+                        pairs.append((obj[0], int(obj[1])))
+        except Exception:
+            # try CSV simple parsing
+            import csv
+            with open(p, newline='') as f:
+                rdr = csv.reader(f)
+                for row in rdr:
+                    if len(row) >= 2:
+                        pairs.append((row[0].strip(), int(row[1])))
+    else:
+        if not args.inputs:
+            raise ValueError("No inputs provided")
+        inputs = [s.strip() for s in args.inputs.split(",")]
+        emotions = [int(s.strip()) for s in args.emotions.split(",")]
+        if len(inputs) != len(emotions):
+            raise ValueError("inputs and emotions must match length")
+        pairs = list(zip(inputs, emotions))
+    return pairs
+
+# ----------------------------
+# Main
+# ----------------------------
 def main():
-    args = parse_args()
-    device = args.device if torch.cuda.is_available() and "cuda" in args.device else "cpu"
-    device = torch.device(device)
-    # load vocab
-    tok2idx, idx2tok = load_vocab(args.vocab)
-    sos_idx = tok2idx.get("<start>", 1)
-    eos_idx = tok2idx.get("<end>", 2)
+    p = argparse.ArgumentParser()
+    p.add_argument("--inputs", type=str, help="comma-separated painting names (no .npy).")
+    p.add_argument("--emotions", type=str, help="comma-separated emotion ids.")
+    p.add_argument("--inputs-file", type=str, help="file with inputs (jsonl or csv)")
+    p.add_argument("--features-root", type=str, required=True, help="where painting .npy files are stored")
+    p.add_argument("--vocab", type=str, required=True)
+    p.add_argument("--vlt-ckpts", type=str, nargs="*", help="explicit list of VLT checkpoint files (optional)")
+    p.add_argument("--cnn-ckpt", type=str, help="optional CNN-LSTM checkpoint file (optional)")
+    p.add_argument("--device", type=str, default="cpu")
+    p.add_argument("--beam-width", type=int, default=1, help="use beam search when >1")
+    p.add_argument("--out", type=str, default="predictions.json")
+    args = p.parse_args()
 
-    # decide inputs/emotions
-    inputs = list(args.inputs)
-    emotions_input = list(args.emotions)
+    device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
+    token_to_idx, idx2token, pad_idx, sos_idx, eos_idx = load_vocab(args.vocab)
+    vocab_size = len(token_to_idx)
 
-    # sample from val if requested
-    if args.sample_from_val:
-        import pandas as pd
-        df = pd.read_csv(args.val_csv)
-        if len(df) == 0:
-            raise RuntimeError("val.csv empty")
-        sampled = df.sample(n=args.num_samples)
-        inputs = []
-        emotions_input = []
-        for _, row in sampled.iterrows():
-            inputs.append(row["painting"])
-            if "emotion_label" in row and not pd.isna(row["emotion_label"]):
-                emotions_input.append(int(row["emotion_label"]))
-            elif "emotion" in row and not pd.isna(row["emotion"]):
-                emotions_input.append(map_emotion_str_to_id(str(row["emotion"])))
-            else:
-                emotions_input.append(8)
+    pairs = read_inputs(args)
 
-    if len(inputs) == 0:
-        raise RuntimeError("No inputs provided (use --inputs or --sample-from-val)")
+    # discover vlt ckpts if none provided
+    vlt_ckpts = discover_vlt_ckpts(args.vlt_ckpts or [])
+    if not vlt_ckpts:
+        print("No VLT checkpoints found (use --vlt-ckpts to pass explicit paths).")
+    else:
+        print("Found VLT checkpoints:", vlt_ckpts)
 
-    # if emotions provided as strings, map to ids
-    emotions = []
-    if len(emotions_input) == 0:
-        raise RuntimeError("No emotions provided; pass as strings/ids or use sample-from-val to pick from val.csv")
-    for e in emotions_input:
-        if isinstance(e, (int, np.integer)):
-            emotions.append(int(e))
-        else:
-            try:
-                emotions.append(int(e))
-            except Exception:
-                emotions.append(map_emotion_str_to_id(str(e)))
+    cnn_ckpt = discover_cnn_ckpt(args.cnn_ckpt)
+    if cnn_ckpt:
+        print("Using CNN checkpoint:", cnn_ckpt)
+    else:
+        print("No CNN checkpoint found (ok: CNN predictions will be skipped)")
 
-    if len(inputs) != len(emotions):
-        raise ValueError("inputs and emotions must have same length")
-
-    # load models if provided
-    vlt_model = None
-    cnn_model = None
-    if args.vlt_ckpt:
-        print("Loading VLT checkpoint:", args.vlt_ckpt)
-        vlt_model, ck_vlt = load_checkpoint_maybe_build(args.vlt_ckpt, device, "vlt", vocab_size=len(tok2idx))
-    if args.cnn_ckpt:
-        print("Loading CNN checkpoint:", args.cnn_ckpt)
-        cnn_model, ck_cnn = load_checkpoint_maybe_build(args.cnn_ckpt, device, "cnn", vocab_size=len(tok2idx))
-
-    # prepare outputs
-    out = []
-    os.makedirs(args.out_dir, exist_ok=True)
-
-    for inp, emo in zip(inputs, emotions):
+    # load models
+    vlt_models = []
+    for ck in vlt_ckpts:
         try:
-            feat = load_feature_by_name_or_path(inp, args.features_root)  # returns C,H,W tensor
+            model, cfg = load_checkpoint_into_vlt(ck, device, vocab_size)
+            if model is not None:
+                # name for model from filename
+                name = Path(ck).stem
+                # derive a short embed name if exists
+                if "glove" in name.lower():
+                    short = "vlt_glove"
+                elif "fasttext" in name.lower() or "ft" in name.lower():
+                    short = "vlt_fasttext"
+                elif "random" in name.lower():
+                    short = "vlt_random"
+                else:
+                    short = "vlt_" + name
+                vlt_models.append((short, model))
         except Exception as e:
-            print(f"[WARN] Could not load feature for {inp}: {e}")
-            # append empty result
-            out.append({"input": inp, "emotion": emo, "error": str(e)})
+            print("Error loading VLT ckpt", ck, e)
+
+    cnn_model = None
+    if cnn_ckpt:
+        try:
+            cnn_model, cnn_cfg = load_checkpoint_into_cnn(cnn_ckpt, device, vocab_size)
+        except Exception as e:
+            print("Could not load CNN model:", e)
+
+    results = []
+    features_root = Path(args.features_root)
+    for painting, emo in pairs:
+        rec = {"input": painting, "emotion": int(emo), "generations": {}}
+        feat_file = features_root / f"{painting}.npy"
+        if not feat_file.exists():
+            print("Missing feature file for", painting, "expected at", feat_file)
+            rec["error"] = "missing_feature"
+            results.append(rec)
             continue
-
-        # ensure float tensor on device
-        feat_t = feat.to(device).float()
-        # models expect (B,3,H,W)
-        if feat_t.ndim == 3:
-            feat_b = feat_t.unsqueeze(0)
+        arr = np.load(feat_file)
+        # arrange to torch tensor (C,H,W)
+        if arr.ndim == 3:
+            img = torch.tensor(arr).permute(2,0,1).unsqueeze(0).float().to(device)
+        elif arr.ndim == 2:  # single channel? convert
+            img = torch.tensor(arr).unsqueeze(0).unsqueeze(0).float().to(device)
         else:
-            feat_b = feat_t
+            # assume HxWxC ordering
+            img = torch.tensor(arr).permute(2,0,1).unsqueeze(0).float().to(device)
 
-        example = {"input": inp, "emotion": int(emo), "generations": {}}
-
-        # VLT
-        if vlt_model is not None:
+        # VLT models
+        for name, model in vlt_models:
             try:
-                gen_ids = vlt_model.greedy_decode(feat_b, int(emo), sos_idx, eos_idx=eos_idx, max_len=args.max_len, device=device)
-                # gen_ids is a list of token ids (may include numbers); decode to words
-                words = [idx2tok.get(int(i), "<unk>") for i in gen_ids if int(i) in idx2tok]
-                example["generations"]["vlt"] = " ".join(words)
+                if args.beam_width and args.beam_width > 1:
+                    # fallback to greedy if beam not implemented
+                    if hasattr(model, "beam_search_decode"):
+                        seq = model.beam_search_decode(img.squeeze(0), int(emo), sos_idx, eos_idx, max_len=20, beam_width=args.beam_width, device=device)
+                    else:
+                        seq = model.greedy_decode(img.squeeze(0), int(emo), sos_idx, eos_idx, max_len=20, device=device)
+                else:
+                    seq = model.greedy_decode(img.squeeze(0), int(emo), sos_idx, eos_idx, max_len=20, device=device)
+                words = [idx2token.get(i, "<unk>") for i in seq]
+                # postprocess: stop at eos if present
+                if eos_idx in seq:
+                    words = words[:words.index(idx2token.get(eos_idx, "<end>"))]
+                rec["generations"][name] = " ".join(words).strip()
             except Exception as e:
-                example["generations"]["vlt_error"] = str(e)
+                print("Error generating with", name, e)
+                rec["generations"][name] = None
 
-        # CNN+LSTM
+        # CNN model (single)
         if cnn_model is not None:
             try:
-                gen_ids = cnn_model.greedy_decode(feat_b, int(emo), sos_idx, eos_idx=eos_idx, max_len=args.max_len, device=device)
-                words = [idx2tok.get(int(i), "<unk>") for i in gen_ids if int(i) in idx2tok]
-                example["generations"]["cnn_lstm"] = " ".join(words)
+                seq = cnn_model.greedy_decode(img.squeeze(0), int(emo), sos_idx, eos_idx, max_len=20, device=device)
+                words = [idx2token.get(i, "<unk>") for i in seq]
+                if eos_idx in seq:
+                    words = words[:seq.index(eos_idx)]
+                rec["generations"]["cnn"] = " ".join(words).strip()
             except Exception as e:
-                example["generations"]["cnn_error"] = str(e)
+                print("Error generating CNN for", painting, e)
+                rec["generations"]["cnn"] = None
 
-        out.append(example)
-        print(f"Processed {inp} | emo={emo} -> {example['generations']}")
+        results.append(rec)
 
-    # save results
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = Path(args.out_dir) / f"predictions_{ts}.json"
-    with open(out_path, "w", encoding="utf8") as f:
-        json.dump(out, f, indent=2, ensure_ascii=False)
-    print("Saved predictions to", out_path)
+    # write output
+    outp = Path(args.out)
+    outp.parent.mkdir(parents=True, exist_ok=True)
+    with open(outp, "w", encoding="utf8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+
+    print("Saved", len(results), "predictions to", outp)
 
 if __name__ == "__main__":
     main()

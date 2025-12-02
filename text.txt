@@ -15,3 +15,14 @@ token_c1 already exists as tokenization of utter_c1
 concatenate token_emotions + token_c1
 
 mention which one is best in vlt_history.json
+
+
+Hi students,
+For Assignment 3, I got few concerns that students have misunderstood the inputs of the model. As a matter of clarity, there are two inputs - image (WikiArt dataset) and emotion (Artemis dataset) and Output - caption (Artemis dataset).
+
+As the deadline is very close, if you have already trained the model without the emotions, please mention such caveats at the presentation. In case you haven't trained the models yet, its suggested to use the emotions for getting better captions.
+
+Hi,
+Please prepare a 10 minutes presentation for the Assignment 3.
+The presentation should include all the efforts you did, architecture, results, and analysis. (Note: You can have as many number slides as per your convenience taking into account the time limit)
+In the next 10 mins, we will share few images and emotions, your task will be to execute it and show the generated captions from the two models. You can create a predict.py file that takes these inputs, do the pre-processing and generate the results from the trained models.
