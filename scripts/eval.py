@@ -1,372 +1,513 @@
-import torch
-import pickle
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
+#!/usr/bin/env python3
+"""
+eval_m1.py
+
+Evaluate CNN Encoder + LSTM Decoder (Model 1) for different embedding types:
+- random
+- glove
+- fasttext
+- tfidf
+
+Metrics:
+- BLEU-1, BLEU-4
+- ROUGE-1, ROUGE-L
+- METEOR (optional, skipped if NLTK/resources missing)
+- Qualitative examples (text output)
+
+Assumptions:
+- Checkpoints are stored as:
+    eval_outputs/results_cnn_lstm/best_model_<emb_type>.pth
+- Preprocessing produced:
+    new_preprocessed/artemis_preprocessed.csv  (with 'split' column)
+    new_preprocessed/features/<painting>.npy
+    new_preprocessed/vocab.pkl
+- SPECIAL_TOKENS order: ["<pad>", "<start>", "<end>", "<unk>"]
+"""
+
+import os
+import os.path as osp
+import argparse
+import json
+from pathlib import Path
+from typing import List, Tuple, Dict, Any
+
 import numpy as np
 import pandas as pd
-import os.path as osp
-import json
-from collections import defaultdict
-from tqdm import tqdm
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction 
-import os
 
-# --- Import models and dataset from M1.py (Ensure M1.py contains the correct definitions) ---
-from M1 import (
-    CustomCNNEncoder, 
-    EmotionLSTMDecoder, 
-    ArtemisCaptioningDataset, 
-    get_embedding_matrix, 
-    CONFIG, 
-    device, 
-    PAD_TOKEN_ID, 
-    START_TOKEN_ID, 
-    END_TOKEN_ID, 
-    VOCAB_SIZE,
-    get_tfidf_vector_matrix 
-)
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-# Define the file path for history storage
-HISTORY_PATH = osp.join(CONFIG["RESULTS_DIR"], "evaluation_history.json")
-# Define the path for the full prediction/GT output
-FULL_PRED_PATH = osp.join(CONFIG["RESULTS_DIR"], "all_predictions_with_gt.json")
+# ---------------- NLP metrics deps (optional for METEOR) ----------------
+try:
+    # Ensure NLTK packages are downloaded if running this for the first time
+    # import nltk; nltk.download(['punkt', 'wordnet', 'omw-1.4', 'averaged_perceptron_tagger'])
+    from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+    from nltk.translate.meteor_score import meteor_score
+    NLTK_AVAILABLE = True
+except Exception:
+    NLTK_AVAILABLE = False
 
-# Global function to load vocab
-def load_vocab_dict(vocab_path):
+# ----------------------- Model 1 Definition (CNN Encoder + LSTM Decoder) -----------------------
+
+# --- CustomCNNEncoder (from M1.py) ---
+class CustomCNNEncoder(nn.Module):
+    def __init__(self, output_dim, input_size=128):
+        super().__init__()
+        
+        final_spatial_dim = input_size // (2**4) 
+        final_cnn_channels = 512
+        OBSERVED_FLATTENED_SIZE = final_cnn_channels * final_spatial_dim * final_spatial_dim 
+        
+        self.cnn_blocks = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1), nn.ReLU(),
+        )
+        
+        self.fc = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(OBSERVED_FLATTENED_SIZE, 1024), 
+            nn.ReLU(),
+            nn.Dropout(0.5), 
+            nn.Linear(1024, output_dim) 
+        )
+
+    def forward(self, x):
+        # Permute from (B, H, W, 3) to (B, 3, H, W) 
+        if x.dim() == 4 and x.shape[-1] == 3:
+              x = x.permute(0, 3, 1, 2) 
+        x = self.cnn_blocks(x)
+        x = self.fc(x)
+        return x # (B, output_dim)
+
+# --- EmotionLSTMDecoder (from M1.py) ---
+class EmotionLSTMDecoder(nn.Module):
+    def __init__(self, cfg: Dict[str, Any], embedding_matrix=None):
+        super().__init__()
+        
+        vocab_size = cfg["vocab_size"]
+        embed_dim = cfg["embedding_dim"]
+        hidden_size = cfg["hidden_size"]
+        num_emotions = cfg["num_emotions"]
+        image_feature_dim = cfg["image_feature_dim"]
+        dropout_rate = cfg["dropout_rate"]
+        
+        self.hidden_size = hidden_size
+        self.image_feature_dim = image_feature_dim 
+        self.pad_idx = cfg.get("pad_idx", 0)
+
+        # 1. Embeddings
+        if embedding_matrix is not None:
+            self.word_embeddings = nn.Embedding.from_pretrained(
+                torch.tensor(embedding_matrix, dtype=torch.float), freeze=False
+            )
+            embed_dim = embedding_matrix.shape[1] 
+        else:
+            # Placeholder for loading from state dict later
+            self.word_embeddings = nn.Embedding(vocab_size, embed_dim)
+        
+        self.emotion_embeddings = nn.Embedding(num_emotions, embed_dim) 
+
+        self.lstm_input_size = embed_dim 
+
+        # 2. Initial State Generators (h0 and c0)
+        init_gen_input_dim = image_feature_dim + embed_dim 
+        
+        self.h0_generator = nn.Sequential(
+            nn.Linear(init_gen_input_dim, hidden_size), 
+            nn.ReLU(),
+            nn.Dropout(dropout_rate)
+        )
+        self.c0_generator = nn.Sequential(
+            nn.Linear(init_gen_input_dim, hidden_size), 
+            nn.ReLU(),
+            nn.Dropout(dropout_rate)
+        )
+        
+        # 3. LSTM
+        self.lstm = nn.LSTM(
+            input_size=self.lstm_input_size,
+            hidden_size=hidden_size,
+            batch_first=True,
+            num_layers=1, 
+            dropout=dropout_rate if dropout_rate > 0 else 0.0
+        )
+
+        # 4. Output Layer
+        self.output_layer = nn.Linear(hidden_size, vocab_size)
+        self.dropout_word = nn.Dropout(dropout_rate)
+
+    def init_hidden_state(self, image_features, emotion_labels):
+        """Generates initial h0 and c0 using image features and emotion embedding."""
+        emotion_vec = self.emotion_embeddings(emotion_labels) 
+        combined_context = torch.cat((image_features, emotion_vec), dim=1) 
+        h0 = self.h0_generator(combined_context).unsqueeze(0) 
+        c0 = self.c0_generator(combined_context).unsqueeze(0) 
+        return h0, c0, emotion_vec
+
+    def forward(self, image_features, emotion_labels, caption_input):
+        
+        h0, c0, _ = self.init_hidden_state(image_features, emotion_labels) 
+        word_embeds = self.word_embeddings(caption_input) 
+        word_embeds = self.dropout_word(word_embeds)
+        
+        lstm_out, _ = self.lstm(word_embeds, (h0, c0)) 
+
+        output = self.output_layer(lstm_out)
+        
+        return output
+
+    def greedy_decode(
+        self,
+        encoder: CustomCNNEncoder,
+        image: torch.Tensor,
+        emo_id: int,
+        sos_idx: int,
+        eos_idx: int,
+        max_len: int,
+        device: torch.device,
+    ) -> List[int]:
+        self.eval()
+        encoder.eval()
+        
+        if image.ndim == 3:
+            image = image.unsqueeze(0)
+        image = image.to(device)
+        emo = torch.tensor([emo_id], dtype=torch.long, device=device)
+
+        with torch.no_grad():
+            image_features = encoder(image)
+            
+            # Get initial hidden state
+            h, c, _ = self.init_hidden_state(image_features, emo)
+            
+            # Start with <start> token
+            current_word_id = torch.tensor([[sos_idx]], dtype=torch.long, device=device)
+            generated: List[int] = []
+
+            for _ in range(max_len):
+                word_embed = self.word_embeddings(current_word_id) # (1, 1, D)
+                
+                # Forward one step through the LSTM
+                lstm_out, (h, c) = self.lstm(word_embed, (h, c)) # (1, 1, H)
+                
+                # Output projection
+                logits = self.output_layer(lstm_out.squeeze(1)) # (1, V)
+                
+                # Greedy search: get next token
+                next_id = torch.argmax(logits, dim=-1).item()
+                generated.append(next_id)
+                
+                if next_id == eos_idx:
+                    break
+                
+                # Prepare next input
+                current_word_id = torch.tensor([[next_id]], dtype=torch.long, device=device)
+
+        return generated
+
+
+# ----------------------- Helper functions (same as your template) -----------------------
+
+def load_vocab(vocab_path: str):
+    import pickle
     with open(vocab_path, "rb") as f:
-        vocab = pickle.load(f)
-    # Handle both old (dict) and new (class) vocab formats
-    tok2idx = vocab.token_to_idx if hasattr(vocab, "token_to_idx") else vocab
+        tok2idx = pickle.load(f)
+    if not isinstance(tok2idx, dict) and hasattr(tok2idx, "token_to_idx"):
+        tok2idx = tok2idx.token_to_idx
     idx2tok = {i: t for t, i in tok2idx.items()}
-    return tok2idx, idx2tok
+    pad_idx = tok2idx.get("<pad>", 0)
+    sos_idx = tok2idx.get("<start>", 1)
+    eos_idx = tok2idx.get("<end>", 2)
+    return tok2idx, idx2tok, pad_idx, sos_idx, eos_idx
 
-## ----------------------------------------------------
-## 1. CAPTION GENERATION (BEAM SEARCH)
-## ----------------------------------------------------
 
-def beam_search_decode(encoder, decoder, image_data, emotion_label, max_len, idx2tok, start_token_id, end_token_id, emotion_word_ids, beam_size=5):
-    """
-    Performs beam search decoding for a single image and emotion pair.
+def ids_to_tokens(ids: List[int], idx2tok: Dict[int, str],
+                  eos_idx: int, pad_idx: int) -> List[str]:
+    toks = []
+    for i in ids:
+        if i == eos_idx or i == pad_idx:
+            break
+        toks.append(idx2tok.get(i, "<unk>"))
+    return toks
+
+
+def simple_rouge_1(hyp: List[str], ref: List[str]) -> Tuple[float, float, float]:
+    """ROUGE-1 (unigram) precision, recall, F1."""
+    # Simplified implementation for ROUGE, as provided in the template
+    hyp_set = hyp
+    ref_set = ref
+    ref_counts = {}
+    for w in ref_set:
+        ref_counts[w] = ref_counts.get(w, 0) + 1
+    hyp_counts = {}
+    for w in hyp_set:
+        hyp_counts[w] = hyp_counts.get(w, 0) + 1
+    overlap = 0
+    for w, c in hyp_counts.items():
+        overlap += min(c, ref_counts.get(w, 0))
+    if overlap == 0:
+        return 0.0, 0.0, 0.0
+    prec = overlap / max(1, len(hyp_set))
+    rec = overlap / max(1, len(ref_set))
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+    return prec, rec, f1
+
+
+def lcs_length(x: List[str], y: List[str]) -> int:
+    m, n = len(x), len(y)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m):
+        for j in range(n):
+            if x[i] == y[j]:
+                dp[i + 1][j + 1] = dp[i][j] + 1
+            else:
+                dp[i + 1][j + 1] = max(dp[i][j + 1], dp[i + 1][j])
+    return dp[m][n]
+
+
+def simple_rouge_l(hyp: List[str], ref: List[str]) -> Tuple[float, float, float]:
+    lcs = lcs_length(hyp, ref)
+    if lcs == 0:
+        return 0.0, 0.0, 0.0
+    prec = lcs / max(1, len(hyp))
+    rec = lcs / max(1, len(ref))
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+    return prec, rec, f1
+
+
+# ----------------------- Evaluation core -----------------------
+
+def evaluate_for_embedding(
+    emb_type: str,
+    args,
+    tok2idx,
+    idx2tok,
+    pad_idx,
+    sos_idx,
+    eos_idx,
+) -> Dict[str, Any]:
+    device = torch.device(args.device)
     
-    FIXED: The input to the LSTM step now correctly uses only the word embedding.
-    """
+    # Checkpoint path for Model 1 (CNN-LSTM)
+    ckpt_dir = Path(args.checkpoints_root)
+    ckpt_path = ckpt_dir / f"best_model_{emb_type}.pth" # Match M1.py saving scheme
+    
+    if not ckpt_path.exists():
+        print(f"[{emb_type}] Best checkpoint not found at {ckpt_path}, skipping.")
+        return {}
+
+    print(f"\n========== Evaluating embedding type: {emb_type} ==========")
+    print("Loading checkpoint:", ckpt_path)
+    ck = torch.load(str(ckpt_path), map_location=device)
+
+    # ----- reconstruct cfg from checkpoint -----
+    if "config" not in ck:
+        print("FATAL ERROR: Checkpoint is missing 'config' key. Cannot reconstruct model.")
+        return {}
+        
+    cfg = ck["config"]
+    print("Config loaded from checkpoint.")
+
+    # ----- build model & load weights -----
+    
+    # The config snapshot from training needs a few additions for consistency
+    cfg["vocab_size"] = len(tok2idx)
+    cfg["pad_idx"] = pad_idx
+    
+    # Initialize Models
+    encoder = CustomCNNEncoder(output_dim=cfg["IMAGE_FEATURE_DIM"], 
+                               input_size=cfg.get("IMAGE_SIZE", 128)).to(device)
+    
+    # Embedding matrix is passed as None, state_dict loads the weights (including embedding weights)
+    decoder = EmotionLSTMDecoder(cfg, embedding_matrix=None).to(device) 
+    
+    try:
+        encoder.load_state_dict(ck["encoder_state_dict"], strict=True)
+        decoder.load_state_dict(ck["decoder_state_dict"], strict=True)
+    except RuntimeError as e:
+        print(f"ERROR loading state dict: {e}")
+        return {}
+
     encoder.eval()
     decoder.eval()
-    
-    # 1. Get Image Features (Pass single item)
-    image_features = encoder(image_data.unsqueeze(0).to(device)) # (1, D_img)
-    emotion_label_tensor = emotion_label.unsqueeze(0).to(device) # (1)
-    
-    # 2. Initialize LSTM state
-    h, c, _ = decoder.init_hidden_state(image_features, emotion_label_tensor) 
-    
-    # Beams: [(log_prob, [word_ids], h, c)]
-    beams = [(0.0, [start_token_id], h, c)] 
-    final_captions = []
-    
-    for _ in range(max_len):
-        candidates = []
-        
-        for score, current_caption, h_t, c_t in beams:
-            last_word_id = current_caption[-1]
-            
-            if last_word_id == end_token_id: 
-                # Normalize the score by length (length penalty/bonus)
-                final_captions.append((score / len(current_caption), current_caption)) 
-                continue 
-            
-            # 3. Single LSTM Step
-            input_token = torch.tensor([[last_word_id]], device=device) # (1, 1)
-            
-            # Use the decoder's logic to get word embedding and apply dropout
-            word_embed = decoder.word_embeddings(input_token) # (1, 1, EmbedDim)
-            word_embed = decoder.dropout_word(word_embed)
 
-            # --- Input to the LSTM must ONLY be the word embedding (FIXED) ---
-            fused_input = word_embed 
+    # ----- load data (test split only) -----
+    df = pd.read_csv(args.csv)
+    df = df[df["split"] == args.split].reset_index(drop=True)
+    print(f"[{emb_type}] Test rows: {len(df)}")
 
-            # Pass the word embedding and the previous hidden state
-            output, (h_next, c_next) = decoder.lstm(fused_input, (h_t, c_t))
-            
-            log_probs = F.log_softmax(decoder.output_layer(output.squeeze(1)), dim=-1) # (1, VocabSize)
-            
-            topk_log_probs, topk_ids = log_probs.topk(beam_size)
-            
-            for i in range(beam_size):
-                word_id = topk_ids.squeeze(0)[i].item()
-                log_prob = topk_log_probs.squeeze(0)[i].item()
-                
-                new_score = score + log_prob
-                new_caption = current_caption + [word_id]
-                
-                # Clone the states for each new candidate path
-                h_next_clone = h_next.clone() 
-                c_next_clone = c_next.clone()
-                
-                candidates.append((new_score, new_caption, h_next_clone, c_next_clone))
+    references: List[List[str]] = []
+    hypotheses: List[List[str]] = []
+    meteor_refs: List[str] = []
+    meteor_hyps: List[str] = []
 
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        beams = candidates[:beam_size]
-        
-    # Add remaining beams to final_captions (applying length normalization here as well)
-    final_captions.extend([(s / len(c), c) for s, c, _, _ in beams])
-    final_captions.sort(key=lambda x: x[0], reverse=True)
-    
-    if not final_captions:
-        return "Caption generation failed."
-        
-    best_caption_ids = final_captions[0][1]
-    
-    # Remove special tokens and the initial emotion word
-    caption_tokens = []
-    
-    # Skip <start> token (index 0)
-    # The first generated word is at index 1
-    
-    # Track if the first non-special token has been processed
-    first_token_processed = False 
-    
-    for i, word_id in enumerate(best_caption_ids[1:]): # Start checking from the first generated token
-        if word_id in [end_token_id, PAD_TOKEN_ID]:
-            break
-        
-        # --- FIX: Remove the emotion word if it's the first generated token ---
-        if not first_token_processed and word_id in emotion_word_ids:
-            # Skip this token (the predicted emotion word)
-            first_token_processed = True
+    if NLTK_AVAILABLE:
+        smoothie = SmoothingFunction().method4
+    else:
+        smoothie = None
+
+    for _, row in df.iterrows():
+        painting = row["painting"]
+        emo = int(row["emotion_label"])
+
+        feat_path = Path(args.features_root) / f"{painting}.npy"
+        if not feat_path.exists():
             continue
-        
-        caption_tokens.append(idx2tok.get(word_id, '<UNK>'))
-        first_token_processed = True # Mark that we've passed the potential emotion word position
-    
-    return " ".join(caption_tokens)
 
+        arr = np.load(feat_path)
+        # Image feature array is HxWx3, need to convert to tensor
+        if arr.ndim == 3:
+            img = torch.tensor(arr).float() 
+        else:
+            img = torch.tensor(arr).float()
 
-## ----------------------------------------------------
-## 2. MAIN EVALUATION FUNCTION
-## ----------------------------------------------------
+        # reference tokens (assuming 'utter_clean' or 'tokens_str' is the source)
+        if isinstance(row.get("tokens_str", None), str):
+            ref_tokens = row["tokens_str"].split()
+        else:
+            # Fallback to utter_clean if tokens_str is missing or not a string
+            ref_tokens = str(row["utter_clean"]).split()
 
-def load_history():
-    if osp.exists(HISTORY_PATH):
-        with open(HISTORY_PATH, 'r') as f:
-            return json.load(f)
-    return {}
-
-def save_history(history):
-    os.makedirs(CONFIG["RESULTS_DIR"], exist_ok=True)
-    with open(HISTORY_PATH, 'w') as f:
-        json.dump(history, f, indent=4)
-
-def save_full_predictions(predictions, gts):
-    """Saves predictions and one ground truth per sample to a separate file."""
-    full_output = []
-    for pred in predictions:
-        image_id = pred['image_id']
-        # Get the list of all ground truths for this sample
-        gt_list = gts.get(image_id, [])
-        
-        # Extract the first ground truth for display/storage
-        first_gt = gt_list[0]['caption'] if gt_list else "N/A"
-        
-        full_output.append({
-            "image_id": image_id,
-            "emotion_target": pred['emotion'],
-            "predicted_caption": pred['caption'],
-            "ground_truth_sample": first_gt,
-            "all_ground_truths": [item['caption'] for item in gt_list]
-        })
-    
-    with open(FULL_PRED_PATH, 'w') as f:
-        json.dump(full_output, f, indent=4)
-    print(f"Saved full prediction and GT details to {FULL_PRED_PATH}")
-
-
-def evaluate_model():
-    print(f"Using device: {device}")
-    
-    tok2idx, idx2tok = load_vocab_dict(CONFIG["VOCAB_PATH"])
-    
-    # Try to dynamically load the checkpoint based on the config's EMBEDDING_TYPE
-    checkpoint_filename = f"best_model_{CONFIG['EMBEDDING_TYPE']}.pth"
-    checkpoint_path = osp.join(CONFIG["RESULTS_DIR"], checkpoint_filename)
-
-    # Fallback to generic name
-    if not osp.exists(checkpoint_path):
-        checkpoint_path = osp.join(CONFIG["RESULTS_DIR"], "best_model.pth")
-
-    if not osp.exists(checkpoint_path):
-        print(f"Error: Checkpoint not found at {checkpoint_path}. Run training first.")
-        return
-
-    # Load checkpoint
-    import warnings
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-    
-    # Re-initialize models using saved config
-    current_config = checkpoint['config']
-    
-    # Load embeddings based on saved config
-    if current_config['EMBEDDING_TYPE'] == 'tf-idf':
-        # Need to ensure get_tfidf_vector_matrix is imported and correctly configured in M1.py
-        emb_matrix, emb_dim, _ = get_tfidf_vector_matrix(current_config["VOCAB_PATH"], osp.dirname(current_config["PREPROCESSED_CSV"]))
-    else:
-        emb_matrix, emb_dim, _, _ = get_embedding_matrix(
-            current_config["EMBEDDING_TYPE"], 
-            vocab_path=current_config["VOCAB_PATH"],
-            repr_dir=osp.dirname(current_config["PREPROCESSED_CSV"])
+        # generate using the LSTM's greedy_decode method
+        gen_ids = decoder.greedy_decode(
+            encoder=encoder,
+            image=img,
+            emo_id=emo,
+            sos_idx=sos_idx,
+            eos_idx=eos_idx,
+            max_len=args.max_gen_len,
+            device=device,
         )
-    
-    current_config["EMBEDDING_DIM"] = emb_dim if emb_dim is not None else current_config["EMOTION_DIM"]
+        hyp_tokens = ids_to_tokens(gen_ids, idx2tok, eos_idx, pad_idx)
+        if len(hyp_tokens) == 0:
+            continue
 
-    encoder = CustomCNNEncoder(output_dim=current_config["IMAGE_FEATURE_DIM"]).to(device)
-    decoder = EmotionLSTMDecoder(
-        vocab_size=len(tok2idx),
-        embed_dim=current_config["EMBEDDING_DIM"],
-        hidden_size=current_config["HIDDEN_SIZE"],
-        num_emotions=current_config["NUM_EMOTIONS"],
-        image_feature_dim=current_config["IMAGE_FEATURE_DIM"],
-        dropout_rate=current_config["DROPOUT_RATE"],
-        embedding_matrix=emb_matrix
-    ).to(device)
-
-    try:
-        encoder.load_state_dict(checkpoint['encoder_state_dict'])
-    except RuntimeError as e:
-        print(f"CRITICAL ERROR loading Encoder state dict: {e}")
-        print("ACTION REQUIRED: Ensure CustomCNNEncoder in M1.py includes nn.Dropout(0.5) to match the saved checkpoint.")
-        return
+        references.append([ref_tokens]) # BLEU requires list of references
+        hypotheses.append(hyp_tokens)
         
-    decoder.load_state_dict(checkpoint['decoder_state_dict'])
-    
-    val_loss = checkpoint.get('best_val_loss', float('inf'))
-    print(f"Loaded model from Val Loss: {val_loss:.4f}")
+        # Prepare for ROUGE/METEOR (which usually take strings or single reference lists)
+        ref_str = " ".join(ref_tokens)
+        hyp_str = " ".join(hyp_tokens)
 
-    # Prepare Emotion ID set for filtering
-    EMOTION_WORDS = ["amusement", "contentment", "awe", "excitement", "fear", "anger", "sadness", "disgust", "something else"]
-    EMOTION_WORD_IDS = {tok2idx.get(w) for w in EMOTION_WORDS if tok2idx.get(w) is not None}
-    
-    # Load test data
-    test_data = ArtemisCaptioningDataset(
-        CONFIG["PREPROCESSED_CSV"], 'test', CONFIG["IMAGE_FEAT_DIR"], CONFIG["VOCAB_PATH"]
-    )
-    test_loader = DataLoader(test_data, batch_size=1, shuffle=False) 
-    
-    predictions = []
-    gts = defaultdict(list) 
-    EMOTION_ID_TO_WORD = {i: t for t, i in zip(EMOTION_WORDS, range(current_config["NUM_EMOTIONS"]))}
+        if NLTK_AVAILABLE:
+            meteor_refs.append(ref_str)
+            meteor_hyps.append(hyp_str)
 
-    print("Generating captions for the test set...")
-    
-    for image_data, emotion_labels, _, caption_target_tokens, painting_id in tqdm(test_loader, desc="Generating Captions"):
-        
-        emotion_label = emotion_labels.squeeze(0).item() 
-        image_data = image_data.squeeze(0)
-        
-        # 1. Generate Caption using beam search
-        predicted_caption_str = beam_search_decode(
-            encoder, decoder, 
-            image_data, 
-            torch.tensor(emotion_label, dtype=torch.long), 
-            max_len=CONFIG["MAX_LEN"], 
-            idx2tok=idx2tok,
-            start_token_id=START_TOKEN_ID, 
-            end_token_id=END_TOKEN_ID,
-            emotion_word_ids=EMOTION_WORD_IDS, 
-            beam_size=5
+    print(f"[{emb_type}] Collected {len(hypotheses)} hypothesis–reference pairs.")
+
+    # BLEU
+    if references and hypotheses:
+        # Note: corpus_bleu expects references as a list of lists of tokens: [[[r1_t1, r1_t2...]], [[r2_t1...]]]
+        bleu1 = corpus_bleu(
+            references, hypotheses,
+            weights=(1.0, 0.0, 0.0, 0.0),
+            smoothing_function=smoothie,
         )
-        
-        # 2. Get Ground Truths (from the original clean utterance column 'utter_clean')
-        gt_df = test_data.df[(test_data.df['painting'] == painting_id[0]) & (test_data.df['emotion_label'] == emotion_label)]
-        ground_truth_strs = gt_df['utter_clean'].tolist()
-        
-        # 3. Store Results
-        result_key = f"{painting_id[0]}_{emotion_label}"
-        predictions.append({
-            "image_id": result_key,
-            "caption": predicted_caption_str,
-            "emotion": EMOTION_ID_TO_WORD.get(emotion_label, "Unknown")
-        })
-        
-        for j, gt_text in enumerate(ground_truth_strs):
-            gts[result_key].append({
-                "image_id": result_key,
-                "cap_id": j,
-                "caption": gt_text
-            })
-
-    # Save predictions JSON (required format for pycocoevaltool)
-    pred_path = osp.join(CONFIG["RESULTS_DIR"], "predictions.json")
-    with open(pred_path, 'w') as f:
-        json.dump(predictions, f, indent=4)
-    print(f"Saved predictions (PyCOCO format) to {pred_path}")
-
-    # Save ground truth JSON (required format for pycocoevaltool)
-    gt_list = [item for sublist in gts.values() for item in sublist]
-    gt_path = osp.join(CONFIG["RESULTS_DIR"], "ground_truths.json")
-    with open(gt_path, 'w') as f:
-        json.dump({"annotations": gt_list}, f, indent=4)
-
-    # 4. Save full prediction output with emotion and GT 
-    save_full_predictions(predictions, gts)
-        
-    ## 5. METRIC CALCULATION (Simplified NLTK BLEU-4)
-    print("\n--- Evaluation Metrics ---")
-    chencherry = SmoothingFunction()
-    total_bleu4 = 0
-    count = 0
-    
-    for pred in predictions:
-        img_id = pred['image_id']
-        pred_tokens = pred['caption'].split()
-        references = [ann['caption'].split() for ann in gts[img_id]]
-        
-        if references and pred_tokens:
-            total_bleu4 += sentence_bleu(references, pred_tokens, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=chencherry.method1)
-            count += 1
-            
-    if count > 0:
-        avg_bleu4 = total_bleu4 / count
-        print(f"**Simplified Average NLTK BLEU-4:** {avg_bleu4:.4f}")
+        bleu4 = corpus_bleu(
+            references, hypotheses,
+            weights=(0.25, 0.25, 0.25, 0.25),
+            smoothing_function=smoothie,
+        )
     else:
-        avg_bleu4 = 0.0
+        bleu1 = bleu4 = 0.0
 
-    print("\nTo get official metrics (ROUGE-L, CIDEr), use the COCO Evaluation toolkit on the saved JSON files.")
+    # ROUGE-1 / ROUGE-L (Using the simple average approach from your template)
+    rouge1_f_list, rougeL_f_list = [], []
+    # ROUGE takes single reference lists (tokens)
+    for hyp, ref in zip(hypotheses, [r[0] for r in references]): 
+        _, _, f1_1 = simple_rouge_1(hyp, ref)
+        _, _, f1_L = simple_rouge_l(hyp, ref)
+        rouge1_f_list.append(f1_1)
+        rougeL_f_list.append(f1_L)
 
-    ## 6. HISTORY STORAGE
-    eval_history = load_history()
-    embedding_key = current_config["EMBEDDING_TYPE"]
-    
-    # Store the results under the embedding type used
-    if embedding_key not in eval_history:
-        eval_history[embedding_key] = []
-        
-    eval_history[embedding_key].append({
-        "timestamp": pd.Timestamp.now().isoformat(),
-        "val_loss": val_loss,
-        "bleu_4": avg_bleu4,
-        "image_feature_dim": current_config["IMAGE_FEATURE_DIM"],
-        "hidden_size": current_config["HIDDEN_SIZE"],
-        "embedding_type": embedding_key
-    })
-    
-    save_history(eval_history)
-    print(f"\nEvaluation history saved to {HISTORY_PATH}")
+    rouge1_f = float(np.mean(rouge1_f_list)) if rouge1_f_list else 0.0
+    rougeL_f = float(np.mean(rougeL_f_list)) if rougeL_f_list else 0.0
 
-    ## 7. DISPLAY SAMPLES
-    print("\n--- Sample Captions ---")
-    num_samples = min(5, len(predictions))
-    
-    for i in range(num_samples):
-        sample = predictions[i]
-        gt_sample = gts[sample['image_id']][0]['caption']
-        print(f"Image ID: {sample['image_id']}")
-        print(f"Emotion Target: {sample['emotion']}")
-        print(f"Predicted Caption: **{sample['caption']}**")
-        print(f"Ground Truth:      {gt_sample}")
-        print("-" * 30)
+    # METEOR (optional)
+    meteor_avg = None
+    if NLTK_AVAILABLE and meteor_refs:
+        try:
+            # meteor_score takes a list of reference strings (or single string) and a hypothesis string
+            scores = [meteor_score([r], h) for r, h in zip(meteor_refs, meteor_hyps)]
+            meteor_avg = float(np.mean(scores))
+        except Exception as e:
+            print(f"Warning: METEOR calculation failed: {e}")
+            meteor_avg = None
+
+    # qualitative examples
+    print(f"\n[{emb_type}] Sample qualitative generations:")
+    num_show = min(args.num_examples, len(hypotheses))
+    for i in range(num_show):
+        # references are stored as [[ref_tokens]] for BLEU, need to extract first ref
+        ref = " ".join(references[i][0])
+        hyp = " ".join(hypotheses[i])
+        print(f"  Example {i+1}:")
+        print(f"      REF: {ref}")
+        print(f"      HYP: {hyp}")
+
+    results = {
+        "embedding_type": emb_type,
+        "bleu1": float(bleu1),
+        "bleu4": float(bleu4),
+        "rouge1_f": rouge1_f,
+        "rougeL_f": rougeL_f,
+        "meteor": meteor_avg,
+        "num_pairs": len(hypotheses),
+    }
+    print(f"\n[{emb_type}] metrics:")
+    print(json.dumps(results, indent=2))
+    return results
+
+
+# ----------------------- Main -----------------------
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Evaluate CNN-LSTM (Model 1) for multiple embedding types.")
+    p.add_argument("--checkpoints-root", type=str, default="eval_outputs/results_cnn_lstm",
+                   help="Root folder containing best_model_<emb_type>.pth")
+    p.add_argument("--embedding-types", type=str, nargs="+",
+                   default=["random", "glove", "fasttext", "tfidf"]) # Added tfidf
+    p.add_argument("--csv", type=str, default="new_preprocessed/artemis_preprocessed.csv")
+    p.add_argument("--features-root", type=str, default="new_preprocessed/features")
+    p.add_argument("--vocab", type=str, default="new_preprocessed/vocab.pkl")
+    p.add_argument("--split", type=str, default="test", help="Data split to evaluate (e.g., 'test' or 'val')")
+    p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--max_gen_len", type=int, default=25)
+    p.add_argument("--num_examples", type=int, default=5)
+    p.add_argument("--out-json", type=str, default="eval_outputs/m1_eval_summary.json")
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    os.makedirs(osp.dirname(args.out_json), exist_ok=True)
+
+    # 1. Load Vocab
+    tok2idx, idx2tok, pad_idx, sos_idx, eos_idx = load_vocab(args.vocab)
+    print("Vocab size:", len(tok2idx))
+    print("PAD idx:", pad_idx, "SOS idx:", sos_idx, "EOS idx:", eos_idx)
+
+    # 2. Run Evaluation for each type
+    all_results = []
+    for emb in args.embedding_types:
+        res = evaluate_for_embedding(
+            emb, args, tok2idx, idx2tok, pad_idx, sos_idx, eos_idx
+        )
+        if res:
+            all_results.append(res)
+
+    # 3. Save Summary
+    summary = {
+        "results": all_results,
+        "config": vars(args) # Save runtime arguments for reference
+    }
+    with open(args.out_json, "w") as f:
+        json.dump(summary, f, indent=2)
+    print("\nSaved evaluation summary to:", args.out_json)
+
 
 if __name__ == "__main__":
-    evaluate_model()
+    main()

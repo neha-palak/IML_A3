@@ -2,16 +2,13 @@ wikiart/
 artemis_dataset.csv
 data_preprocessed/
 raw_data/
-checkpoints/m1_pt/
-checkpoints/m2_pt/
-checkpoints/m1/
-checkpoints/model1/
-checkpoints/m2/
-checkpoints/model2/
+
 eval_outputs/model2
-eval_outputs/results_cnn_lstm/best_model.pth
+eval_outputs/results_cnn_lstm/best_model_glove.pth
 eval_outputs/results_cnn_lstm/best_model_fasttext.pth
+
 new_preprocessed/
 new_checkpoints/
+
 __pycache__
 

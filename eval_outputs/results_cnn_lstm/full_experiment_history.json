@@ -47,6 +47,86 @@
             "embedding_type": "fasttext",
             "num_epochs": 3,
             "final_val_loss": 4.83575338252408
+        },
+        {
+            "embedding_type": "fasttext",
+            "train_loss_history": [
+                6.068856353067603,
+                5.2598576771770835,
+                4.978552416827155,
+                4.788125774841933,
+                4.6486014610697
+            ],
+            "val_loss_history": [
+                5.360817864473649,
+                5.022750780558688,
+                4.807318523971319,
+                4.655634989948734,
+                4.542716481438063
+            ],
+            "best_val_epoch": 5,
+            "config_snapshot": {
+                "EMBEDDING_TYPE": "fasttext",
+                "PREPROCESSED_CSV": "new_preprocessed/artemis_preprocessed.csv",
+                "VOCAB_PATH": "new_preprocessed/vocab.pkl",
+                "IMAGE_FEAT_DIR": "new_preprocessed/features",
+                "RESULTS_DIR": "eval_outputs/results_cnn_lstm",
+                "IMAGE_SIZE": 128,
+                "IMAGE_FEATURE_DIM": 256,
+                "EMOTION_DIM": 300,
+                "HIDDEN_SIZE": 256,
+                "DROPOUT_RATE": 0.5,
+                "NUM_EMOTIONS": 9,
+                "MAX_LEN": 25,
+                "BATCH_SIZE": 32,
+                "NUM_EPOCHS": 5,
+                "LEARNING_RATE": 0.0001,
+                "SEED": 42,
+                "EMBEDDING_DIM": 300
+            },
+            "num_epochs": 5,
+            "final_val_loss": 4.542716481438063
+        }
+    ],
+    "glove": [
+        {
+            "embedding_type": "glove",
+            "train_loss_history": [
+                5.990260463417037,
+                5.137659147690594,
+                4.86719928304782,
+                4.690360145531526,
+                4.565003064352455
+            ],
+            "val_loss_history": [
+                5.238130615581659,
+                4.898773394132915,
+                4.6908724582720955,
+                4.54981671899006,
+                4.445484177655889
+            ],
+            "best_val_epoch": 5,
+            "config_snapshot": {
+                "EMBEDDING_TYPE": "glove",
+                "PREPROCESSED_CSV": "new_preprocessed/artemis_preprocessed.csv",
+                "VOCAB_PATH": "new_preprocessed/vocab.pkl",
+                "IMAGE_FEAT_DIR": "new_preprocessed/features",
+                "RESULTS_DIR": "eval_outputs/results_cnn_lstm",
+                "IMAGE_SIZE": 128,
+                "IMAGE_FEATURE_DIM": 256,
+                "EMOTION_DIM": 300,
+                "HIDDEN_SIZE": 256,
+                "DROPOUT_RATE": 0.5,
+                "NUM_EMOTIONS": 9,
+                "MAX_LEN": 25,
+                "BATCH_SIZE": 32,
+                "NUM_EPOCHS": 5,
+                "LEARNING_RATE": 0.0001,
+                "SEED": 42,
+                "EMBEDDING_DIM": 300
+            },
+            "num_epochs": 5,
+            "final_val_loss": 4.445484177655889
         }
     ]
 }
