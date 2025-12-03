@@ -31,6 +31,22 @@
             "embedding_type": "fasttext",
             "num_epochs": 3,
             "final_val_loss": 4.8382007183764095
+        },
+        {
+            "train_loss_history": [
+                6.069523789031665,
+                5.27927745373597,
+                5.006738070479748
+            ],
+            "val_loss_history": [
+                5.380962415914956,
+                5.053904827085362,
+                4.83575338252408
+            ],
+            "best_val_epoch": 3,
+            "embedding_type": "fasttext",
+            "num_epochs": 3,
+            "final_val_loss": 4.83575338252408
         }
     ]
 }
