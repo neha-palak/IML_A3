@@ -158,7 +158,7 @@ class CustomCNNEncoder(nn.Module):
             nn.Flatten(),
             nn.Linear(OBSERVED_FLATTENED_SIZE, 1024), 
             nn.ReLU(),
-            #nn.Dropout(0.5), single layer does not need dropout 
+            nn.Dropout(0.5),
             nn.Linear(1024, output_dim) 
         )
         
