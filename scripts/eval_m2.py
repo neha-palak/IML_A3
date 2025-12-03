@@ -1,309 +1,587 @@
 #!/usr/bin/env python3
 """
-scripts/eval_m2.py
+eval_m2.py
 
-No-CLI evaluator for VisionLanguageTransformer.
+Evaluate Vision-Language Transformer (Model 2) for different embedding types:
+- random
+- glove
+- fasttext
 
-- Loads per-embedding best checkpoints (m2_best_{emb}.pt)
-- Generates greedy captions on val set
-- Computes BLEU (nltk), ROUGE-L (rouge_score), CIDEr (pycocoevalcap) if available
-- Writes:
-    eval_outputs/m2_eval_all.json   <- unified metrics for all embeddings
-    eval_outputs/m2_{emb}_samples.csv  <- generated samples per embedding
+Metrics:
+- BLEU-1, BLEU-4
+- ROUGE-1, ROUGE-L
+- METEOR (optional, skipped if NLTK/resources missing)
+- Qualitative examples (text output)
+
+Assumptions:
+- Checkpoints are stored as:
+    new_checkpoints/<emb_type>/m2_<emb_type>_best.pt
+- Preprocessing produced:
+    new_preprocessed/artemis_preprocessed.csv  (with 'split' column)
+    new_preprocessed/features/<painting>.npy
+    new_preprocessed/vocab.pkl
+- SPECIAL_TOKENS order: ["<pad>", "<start>", "<end>", "<unk>"]
 """
 
+import os
+import os.path as osp
+import argparse
 import json
-import math
-import csv
-import time
 from pathlib import Path
-from collections import defaultdict
+from typing import List, Tuple, Dict, Any
 
 import numpy as np
+import pandas as pd
+
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
 
-# metric libs (optional)
+# ---------------- NLP metrics deps (optional for METEOR) ----------------
 try:
-    import nltk
     from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
-    nltk_available = True
+    from nltk.translate.meteor_score import meteor_score
+    NLTK_AVAILABLE = True
 except Exception:
-    nltk_available = False
+    NLTK_AVAILABLE = False
 
-try:
-    from rouge_score import rouge_scorer
-    rouge_available = True
-except Exception:
-    rouge_available = False
+# ----------------------- Model definition (same as training, embedding-based) -----------------------
 
-try:
-    # pycocoevalcap may be installed; try to import CIDEr
-    from pycocoevalcap.cider.cider import Cider
-    cider_available = True
-except Exception:
-    cider_available = False
+def sinusoidal_positional_encoding(n_pos: int, d_model: int) -> torch.Tensor:
+    pe = torch.zeros(n_pos, d_model)
+    position = torch.arange(0, n_pos, dtype=torch.float).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, d_model, 2).float() *
+                         (-float(np.log(10000.0)) / d_model))
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    return pe
 
-# import project model/dataset
-from model2_vlt import VisionLanguageTransformer, CaptionDataset, DEFAULT_CONFIG
 
-# -----------------------
-# Helpers
-# -----------------------
-def load_vocab(path):
-    p = Path(path)
-    if not p.exists():
-        return None, None
+class PatchEmbed(nn.Module):
+    def __init__(self, img_size=224, patch_size=32, in_chans=3, embed_dim=256):
+        super().__init__()
+        assert img_size % patch_size == 0
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.num_patches = (img_size // patch_size) ** 2
+        self.proj = nn.Conv2d(in_chans, embed_dim,
+                              kernel_size=patch_size, stride=patch_size)
+
+    def forward(self, x):
+        x = self.proj(x)  # (B, E, H', W')
+        B, E, Hn, Wn = x.shape
+        return x.flatten(2).transpose(1, 2)  # (B, N, E)
+
+
+class VisionTransformerEncoder(nn.Module):
+    def __init__(self, img_size=224, patch_size=32,
+                 embed_dim=256, depth=2, num_heads=4, dropout=0.1):
+        super().__init__()
+        self.patch_embed = PatchEmbed(img_size, patch_size, 3, embed_dim)
+        P = self.patch_embed.num_patches
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        pos = sinusoidal_positional_encoding(P + 1, embed_dim)
+        self.pos_embed = nn.Parameter(pos, requires_grad=False)
+
+        layer = nn.TransformerEncoderLayer(
+            embed_dim, num_heads,
+            dim_feedforward=embed_dim * 4,
+            dropout=dropout,
+            batch_first=False
+        )
+        self.encoder = nn.TransformerEncoder(layer, num_layers=depth)
+        self.norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, x):
+        B = x.shape[0]
+        x = self.patch_embed(x)            # (B, N, D)
+        cls = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls, x], dim=1)     # (B, N+1, D)
+
+        pos = self.pos_embed.unsqueeze(0).to(x.device)
+        if pos.size(1) != x.size(1):
+            pos = pos[:, :x.size(1), :]
+        x = x + pos
+        x = x.transpose(0, 1)             # (S, B, D)
+        x = self.encoder(x)
+        x = self.norm(x.transpose(0, 1))  # (B, S, D)
+        return x
+
+
+class DecoderLayerCustom(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward=1024, dropout=0.1):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=False
+        )
+        self.cross_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=False
+        )
+
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.activation = nn.ReLU()
+
+    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None):
+        tgt2, _ = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask)
+        tgt = self.norm1(tgt + self.dropout(tgt2))
+
+        tgt2, _ = self.cross_attn(tgt, memory, memory, attn_mask=memory_mask)
+        tgt = self.norm2(tgt + self.dropout(tgt2))
+
+        ff = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+        tgt = self.norm3(tgt + self.dropout(ff))
+        return tgt
+
+
+class TransformerDecoderCustom(nn.Module):
+    def __init__(self, layer: DecoderLayerCustom, num_layers: int):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [layer] +
+            [DecoderLayerCustom(layer.self_attn.embed_dim,
+                                layer.self_attn.num_heads,
+                                layer.linear1.out_features,
+                                layer.dropout.p)
+             for _ in range(num_layers - 1)]
+        )
+
+    def forward(self, tgt, memory, tgt_mask=None):
+        out = tgt
+        for layer in self.layers:
+            out = layer(out, memory, tgt_mask=tgt_mask)
+        return out
+
+
+class VisionLanguageTransformer(nn.Module):
+    """
+    Emotion-conditioned VLT with simple word embeddings (for random/glove/fasttext).
+    The actual embedding weights will be loaded from the checkpoint.
+    """
+    def __init__(self, cfg: Dict[str, Any]):
+        super().__init__()
+        self.cfg = cfg
+        D_enc = cfg.get("vit_embed_dim", 256)
+        D_dec = cfg.get("decoder_embed_dim", 256)
+        vocab_size = cfg["vocab_size"]
+        num_emotions = cfg.get("num_emotions", 9)
+        max_seq_len = cfg.get("max_seq_len", 25)
+        dropout = cfg.get("dropout", 0.1)
+
+        self.encoder = VisionTransformerEncoder(
+            img_size=cfg.get("image_size", 224),
+            patch_size=cfg.get("patch_size", 32),
+            embed_dim=D_enc,
+            depth=cfg.get("vit_depth", 2),
+            num_heads=cfg.get("vit_num_heads", 4),
+            dropout=dropout,
+        )
+
+        self.token_embed = nn.Embedding(vocab_size, D_dec)
+        pos_tokens = sinusoidal_positional_encoding(max_seq_len + 1, D_dec)
+        self.pos_embed_tokens = nn.Parameter(pos_tokens, requires_grad=False)
+
+        if D_enc != D_dec:
+            self.enc_to_dec = nn.Linear(D_enc, D_dec)
+        else:
+            self.enc_to_dec = nn.Identity()
+
+        self.emotion_emb = nn.Embedding(num_emotions, D_dec)
+        nn.init.xavier_uniform_(self.emotion_emb.weight)
+
+        dec_layer = DecoderLayerCustom(
+            d_model=D_dec,
+            nhead=cfg.get("decoder_num_heads", 4),
+            dim_feedforward=D_dec * 4,
+            dropout=dropout,
+        )
+        self.decoder = TransformerDecoderCustom(
+            dec_layer, cfg.get("decoder_depth", 2)
+        )
+
+        self.output_proj = nn.Linear(D_dec, vocab_size)
+        self.pad_idx = cfg.get("pad_idx", 0)
+
+    def forward(self, images, token_ids, emo_ids):
+        """
+        images: (B, 3, H, W)
+        token_ids: (B, T)
+        emo_ids: (B,)
+        """
+        device = images.device
+        B, T = token_ids.shape
+
+        enc = self.encoder(images)        # (B, S, D_enc)
+        enc = self.enc_to_dec(enc)        # (B, S, D_dec)
+        memory = enc.transpose(0, 1)      # (S, B, D_dec)
+
+        tok_emb = self.token_embed(token_ids)          # (B, T, D_dec)
+        emo_vec = self.emotion_emb(emo_ids).unsqueeze(1)  # (B, 1, D_dec)
+        dec_in = torch.cat([emo_vec, tok_emb], dim=1)      # (B, T+1, D)
+
+        pos = self.pos_embed_tokens[: T + 1].unsqueeze(0).to(device)
+        dec_in = dec_in + pos                             # (B, T+1, D)
+        dec_in = dec_in.transpose(0, 1)                   # (T+1, B, D)
+
+        tgt_mask = torch.triu(
+            torch.ones(T + 1, T + 1, device=device), diagonal=1
+        ).bool()
+        dec_out = self.decoder(dec_in, memory, tgt_mask=tgt_mask)
+        dec_out = dec_out.transpose(0, 1)                 # (B, T+1, D)
+        logits = self.output_proj(dec_out)                # (B, T+1, V)
+        return logits[:, 1:, :]                           # (B, T, V)
+
+    def greedy_decode(
+        self,
+        image: torch.Tensor,
+        emo_id: int,
+        sos_idx: int,
+        eos_idx: int,
+        max_len: int,
+        device: torch.device,
+    ) -> List[int]:
+        self.eval()
+        if image.ndim == 3:
+            image = image.unsqueeze(0)
+        image = image.to(device)
+        emo = torch.tensor([emo_id], dtype=torch.long, device=device)
+
+        with torch.no_grad():
+            enc = self.encoder(image)
+            enc = self.enc_to_dec(enc)
+            memory = enc.transpose(0, 1)
+
+            cur = torch.tensor([[sos_idx]], dtype=torch.long, device=device)
+            generated: List[int] = []
+
+            for step in range(max_len):
+                cur_padded = F.pad(cur, (0, max_len - cur.size(1)),
+                                   value=self.pad_idx)
+                logits = self.forward(image, cur_padded, emo)  # (1, T, V)
+                step_idx = cur.size(1) - 1
+                logit_step = logits[:, step_idx, :]            # (1, V)
+                next_id = torch.argmax(logit_step, dim=-1).item()
+                generated.append(next_id)
+                if next_id == eos_idx:
+                    break
+                cur = torch.cat(
+                    [cur, torch.tensor([[next_id]], device=device)], dim=1
+                )
+
+        return generated
+
+
+# ----------------------- Helper functions -----------------------
+
+def load_vocab(vocab_path: str):
     import pickle
-    v = pickle.load(open(p, "rb"))
-    if not isinstance(v, dict) and hasattr(v, "token_to_idx"):
-        tok2idx = v.token_to_idx
-    else:
-        tok2idx = v
+    with open(vocab_path, "rb") as f:
+        tok2idx = pickle.load(f)
+    if not isinstance(tok2idx, dict) and hasattr(tok2idx, "token_to_idx"):
+        tok2idx = tok2idx.token_to_idx
     idx2tok = {i: t for t, i in tok2idx.items()}
-    return tok2idx, idx2tok
+    pad_idx = tok2idx.get("<pad>", 0)
+    sos_idx = tok2idx.get("<start>", 1)
+    eos_idx = tok2idx.get("<end>", 2)
+    return tok2idx, idx2tok, pad_idx, sos_idx, eos_idx
 
-def tokens_to_text(tokens, idx2tok):
-    if idx2tok is None:
-        return " ".join(str(t) for t in tokens if t != 0)
-    words = []
-    for t in tokens:
-        if t == 0:
-            continue
-        words.append(idx2tok.get(int(t), "<unk>"))
-    return " ".join(words)
 
-def greedy_generate_batch(model, imgs, emos, tfidf_vecs, device, sos_idx=1, eos_idx=None, max_len=None):
-    # Generates lists of token ids per image (greedy) using model.greedy_decode for each image
-    outs = []
-    model.eval()
-    with torch.no_grad():
-        B = imgs.size(0)
-        for i in range(B):
-            img = imgs[i].to(device)
-            emo = int(emos[i].item()) if isinstance(emos[i], torch.Tensor) else int(emos[i])
-            if model.embedding_type == "tfidf":
-                tfv = tfidf_vecs[i].unsqueeze(0).to(device) if tfidf_vecs is not None else None
-                gen = model.greedy_decode(img, emo, sos_idx=sos_idx, eos_idx=eos_idx, max_len=max_len, device=device, tfidf_vec=tfv)
+def ids_to_tokens(ids: List[int], idx2tok: Dict[int, str],
+                  eos_idx: int, pad_idx: int) -> List[str]:
+    toks = []
+    for i in ids:
+        if i == eos_idx or i == pad_idx:
+            break
+        toks.append(idx2tok.get(i, "<unk>"))
+    return toks
+
+
+def simple_rouge_1(hyp: List[str], ref: List[str]) -> Tuple[float, float, float]:
+    """ROUGE-1 (unigram) precision, recall, F1."""
+    hyp_set = hyp
+    ref_set = ref
+    ref_counts = {}
+    for w in ref_set:
+        ref_counts[w] = ref_counts.get(w, 0) + 1
+    hyp_counts = {}
+    for w in hyp_set:
+        hyp_counts[w] = hyp_counts.get(w, 0) + 1
+    overlap = 0
+    for w, c in hyp_counts.items():
+        overlap += min(c, ref_counts.get(w, 0))
+    if overlap == 0:
+        return 0.0, 0.0, 0.0
+    prec = overlap / max(1, len(hyp_set))
+    rec = overlap / max(1, len(ref_set))
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+    return prec, rec, f1
+
+
+def lcs_length(x: List[str], y: List[str]) -> int:
+    m, n = len(x), len(y)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m):
+        for j in range(n):
+            if x[i] == y[j]:
+                dp[i + 1][j + 1] = dp[i][j] + 1
             else:
-                gen = model.greedy_decode(img, emo, sos_idx=sos_idx, eos_idx=eos_idx, max_len=max_len, device=device)
-            outs.append(gen)
-    return outs
+                dp[i + 1][j + 1] = max(dp[i][j + 1], dp[i + 1][j])
+    return dp[m][n]
 
-# -----------------------
-# Metric wrappers
-# -----------------------
-def compute_bleu_corpus(references, hypotheses):
-    # references: list of list of reference token lists (tokenized words)
-    # hypotheses: list of hypothesis token lists (tokenized words)
-    if not nltk_available:
-        return None
-    # nltk corpus_bleu expects list of list of references (each reference is list of tokens)
-    # we use SmoothingFunction method1 to avoid zero scores.
-    ch = SmoothingFunction()
-    # Use cumulative 4-gram BLEU
-    try:
-        score = corpus_bleu(references, hypotheses, smoothing_function=ch.method1)
-    except Exception:
-        # fallback: micro-average with uniform weights
-        score = 0.0
-    return float(score)
 
-def compute_rouge_l(references_texts, hypotheses_texts):
-    if not rouge_available:
-        return None
-    scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
-    scores = []
-    for ref, hyp in zip(references_texts, hypotheses_texts):
-        sc = scorer.score(ref, hyp)
-        scores.append(sc['rougeL'].fmeasure)
-    return float(sum(scores) / max(1, len(scores)))
+def simple_rouge_l(hyp: List[str], ref: List[str]) -> Tuple[float, float, float]:
+    lcs = lcs_length(hyp, ref)
+    if lcs == 0:
+        return 0.0, 0.0, 0.0
+    prec = lcs / max(1, len(hyp))
+    rec = lcs / max(1, len(ref))
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+    return prec, rec, f1
 
-def compute_cider(references_texts, hypotheses_texts):
-    if not cider_available:
-        return None
-    # pycocoevalcap Cider expects dicts mapping id->list of references / candidates
-    refs_dict = {}
-    hyps_dict = {}
-    for i, (r, h) in enumerate(zip(references_texts, hypotheses_texts)):
-        # references must be list
-        refs_dict[i] = [r]
-        hyps_dict[i] = h
-    cider_scorer = Cider()
-    score, _ = cider_scorer.compute_score(refs_dict, hyps_dict)
-    # cider returns (score, scores_list)
-    return float(score)
 
-# -----------------------
-# Main (no CLI)
-# -----------------------
-def main():
-    print("eval_m2.py starting...")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("device:", device)
+# ----------------------- Evaluation core -----------------------
 
-    tok2idx, idx2tok = load_vocab(DEFAULT_CONFIG["vocab_path"])
-    if idx2tok is None:
-        print("Warning: vocab not loaded; generated text will be token ids.")
+def evaluate_for_embedding(
+    emb_type: str,
+    args,
+    tok2idx,
+    idx2tok,
+    pad_idx,
+    sos_idx,
+    eos_idx,
+) -> Dict[str, Any]:
+    device = torch.device(args.device)
+    ckpt_dir = Path(args.checkpoints_root) / emb_type
+    ckpt_path = ckpt_dir / f"m2_{emb_type}_best.pt"
+    if not ckpt_path.exists():
+        print(f"[{emb_type}] Best checkpoint not found at {ckpt_path}, skipping.")
+        return {}
 
-    embedding_types = ["random", "glove", "fasttext", "tfidf"]
-    ckpt_dir = Path(DEFAULT_CONFIG["checkpoint_root"]) / "model2"
-    out_root = Path("eval_outputs")
-    out_root.mkdir(exist_ok=True)
+    print(f"\n========== Evaluating embedding type: {emb_type} ==========")
+    print("Loading checkpoint:", ckpt_path)
+    ck = torch.load(str(ckpt_path), map_location=device)
 
-    unified = {}
+    # ----- reconstruct cfg -----
+    if "config" in ck:
+        cfg = ck["config"]
+        print("Config loaded from checkpoint.")
+    else:
+        print("No config in checkpoint; reconstructing from state_dict shapes.")
+        sd = ck["model_state_dict"]
 
-    # detect tfidf dir if present
-    tfidf_dir = None
-    tfidf_dim = None
-    cand = Path("data_preprocessed/tfidf_npy")
-    if cand.exists() and any(cand.glob("*.npy")):
-        tfidf_dir = cand
-        sample = next(cand.glob("*.npy"))
-        tfidf_dim = int(np.load(sample).shape[-1])
-        print("Detected tfidf dir:", tfidf_dir, "dim=", tfidf_dim)
+        # token embedding dim (300 for glove/fasttext, 256 for random)
+        dec_dim = sd["token_embed.weight"].shape[1]
 
-    val_csv = Path(DEFAULT_CONFIG["val_csv"])
-    if not val_csv.exists():
-        raise RuntimeError("Val CSV not found: " + str(val_csv))
+        # encoder embed dim (should match decoder for your training)
+        enc_dim = sd["encoder.patch_embed.proj.weight"].shape[0]
 
-    for emb in embedding_types:
-        ckpt_path = ckpt_dir / f"m2_best_{emb}.pt"
-        if not ckpt_path.exists():
-            print(f"[{emb}] best ckpt not found: {ckpt_path} — skipping.")
-            continue
-        print(f"\n=== Evaluating embedding: {emb} ===")
-        ckpt = torch.load(str(ckpt_path), map_location="cpu")
-        cfg = ckpt.get("config", DEFAULT_CONFIG)
+        # num emotions
+        num_emotions = sd["emotion_emb.weight"].shape[0]
 
-        # build dataset & loader
-        ds = CaptionDataset(str(val_csv), cfg["images_features_root"],
-                            max_len=cfg["max_seq_len"], embedding_type=emb,
-                            tfidf_dir=(str(tfidf_dir) if (emb == "tfidf" and tfidf_dir is not None) else None))
-        loader = DataLoader(ds, batch_size=8, shuffle=False, num_workers=0)
+        # max_seq_len+1 from positional embedding
+        max_pos = sd["pos_embed_tokens"].shape[0]
+        max_seq_len = max_pos - 1
 
-        # build model and load state
-        model = VisionLanguageTransformer(cfg,
-                                         pretrained_token_emb_weights=None,
-                                         embedding_type=emb,
-                                         tfidf_dim=(tfidf_dim if emb == "tfidf" else None))
-        model.load_state_dict(ckpt["model_state_dict"], strict=False)
-        model.to(device)
-
-        criterion = nn.CrossEntropyLoss(ignore_index=0)
-
-        # iterate, compute loss and collect references + hyps for metrics
-        model.eval()
-        total_loss = 0.0
-        n_examples = 0
-        total_correct = 0
-        total_tokens = 0
-
-        references_for_bleu = []   # list of list of token lists (nltk format)
-        hypotheses_for_bleu = []   # list of token lists
-        references_texts = []
-        hypotheses_texts = []
-        generated_rows = []  # for CSV: [ref_tokens, ref_text, gen_tokens, gen_text]
-
-        start = time.time()
-        for batch in loader:
-            if emb == "tfidf":
-                imgs, token_ids, emos, tfidf_vecs = batch
-                tfidf_vecs = tfidf_vecs.to(device)
-            else:
-                imgs, token_ids, emos = batch
-                tfidf_vecs = None
-
-            imgs = imgs.to(device)
-            token_ids = token_ids.to(device)
-            emos = emos.to(device)
-
-            # forward for loss
-            if emb == "tfidf":
-                logits = model(imgs, token_ids, emos, tfidf_vecs)
-            else:
-                logits = model(imgs, token_ids, emos)
-
-            logits_in = logits[:, :-1]  # (B, T-1, V)
-            targets = token_ids[:, 1:].contiguous()
-            B, Tm, V = logits_in.shape
-            loss = criterion(logits_in.reshape(B * Tm, V), targets.reshape(B * Tm))
-            total_loss += loss.item() * B
-            n_examples += B
-
-            # token accuracy
-            pred = logits_in.argmax(dim=-1)
-            mask = (targets != 0)
-            total_correct += ((pred == targets) & mask).sum().item()
-            total_tokens += mask.sum().item()
-
-            # generate greedy per image (uses model.greedy_decode which is per-image)
-            gen_ids = greedy_generate_batch(model, imgs, emos, tfidf_vecs if emb == "tfidf" else None,
-                                           device=device, sos_idx=1, eos_idx=None, max_len=cfg["max_seq_len"])
-
-            for i in range(len(gen_ids)):
-                ref_ids = token_ids[i].tolist()
-                hyp_ids = gen_ids[i]
-                ref_text = tokens_to_text(ref_ids, idx2tok)
-                hyp_text = tokens_to_text(hyp_ids, idx2tok)
-                # prepare BLEU format: references are list of tokenized strings
-                ref_tokens = [r for r in ref_text.split()] if ref_text.strip() else []
-                hyp_tokens = [h for h in hyp_text.split()] if hyp_text.strip() else []
-                if len(ref_tokens) == 0:
-                    # fall back to token ids as strings if vocab missing
-                    ref_tokens = [str(x) for x in ref_ids if x != 0]
-                if len(hyp_tokens) == 0:
-                    hyp_tokens = [str(x) for x in hyp_ids if x != 0]
-
-                references_for_bleu.append([ref_tokens])
-                hypotheses_for_bleu.append(hyp_tokens)
-                references_texts.append(ref_text)
-                hypotheses_texts.append(hyp_text)
-                generated_rows.append((ref_ids, ref_text, hyp_ids, hyp_text))
-
-        elapsed = time.time() - start
-        avg_loss = total_loss / max(1, n_examples)
-        token_acc = total_correct / max(1, total_tokens) if total_tokens > 0 else 0.0
-        ppl = math.exp(avg_loss) if avg_loss < 100 else float("inf")
-
-        print(f"[{emb}] examples={n_examples} loss={avg_loss:.4f} ppl={ppl:.2f} token_acc={token_acc:.4f} time={elapsed:.1f}s")
-
-        # compute metrics
-        bleu = compute_bleu_corpus(references_for_bleu, hypotheses_for_bleu) if nltk_available else None
-        rouge_l = compute_rouge_l(references_texts, hypotheses_texts) if rouge_available else None
-        cider = compute_cider(references_texts, hypotheses_texts) if cider_available else None
-
-        print("Metrics:", {"BLEU": bleu, "ROUGE-L": rouge_l, "CIDEr": cider})
-
-        # write samples CSV for this embedding
-        csv_path = out_root / f"m2_{emb}_samples.csv"
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(csv_path, "w", newline="", encoding="utf8") as f:
-            w = csv.writer(f)
-            w.writerow(["ref_tokens", "ref_text", "gen_tokens", "gen_text"])
-            for r in generated_rows:
-                w.writerow([json.dumps(r[0]), r[1], json.dumps(r[2]), r[3]])
-        print("Saved samples ->", csv_path)
-
-        # add to unified dict
-        unified[emb] = {
-            "checkpoint": str(ckpt_path),
-            "n_examples": int(n_examples),
-            "loss": float(avg_loss),
-            "perplexity": float(ppl),
-            "token_accuracy": float(token_acc),
-            "BLEU": float(bleu) if bleu is not None else None,
-            "ROUGE-L": float(rouge_l) if rouge_l is not None else None,
-            "CIDEr": float(cider) if cider is not None else None,
-            "samples_csv": str(csv_path)
+        cfg = {
+            "image_size": args.image_size,
+            "patch_size": args.patch_size,
+            "vit_embed_dim": int(enc_dim),
+            "vit_depth": args.vit_depth,
+            "vit_num_heads": args.vit_num_heads,
+            "decoder_embed_dim": int(dec_dim),
+            "decoder_depth": args.decoder_depth,
+            "decoder_num_heads": args.decoder_num_heads,
+            "max_seq_len": int(max_seq_len),
+            "dropout": args.dropout,
+            "num_emotions": int(num_emotions),
         }
 
-    # save unified JSON
-    unified_path = out_root / "m2_eval_all.json"
-    json.dump(unified, open(unified_path, "w"), indent=2)
-    print("Saved unified metrics ->", unified_path)
-    print("Done.")
+    cfg["vocab_size"] = len(tok2idx)
+    cfg["pad_idx"] = pad_idx
+
+    # ----- build model & load weights -----
+    model = VisionLanguageTransformer(cfg)
+    model.load_state_dict(ck["model_state_dict"], strict=True)
+    model.to(device)
+    model.eval()
+
+    # ----- load data (test split only) -----
+    df = pd.read_csv(args.csv)
+    df = df[df["split"] == args.split].reset_index(drop=True)
+    print(f"[{emb_type}] Test rows: {len(df)}")
+
+    references: List[List[str]] = []
+    hypotheses: List[List[str]] = []
+    meteor_refs: List[str] = []
+    meteor_hyps: List[str] = []
+
+    if NLTK_AVAILABLE:
+        smoothie = SmoothingFunction().method4
+    else:
+        smoothie = None
+
+    for _, row in df.iterrows():
+        painting = row["painting"]
+        emo = int(row["emotion_label"])
+
+        feat_path = Path(args.features_root) / f"{painting}.npy"
+        if not feat_path.exists():
+            continue
+
+        arr = np.load(feat_path)
+        if arr.ndim == 3:
+            img = torch.tensor(arr).permute(2, 0, 1).float()
+        else:
+            img = torch.tensor(arr).float()
+
+        # reference tokens
+        if isinstance(row.get("tokens_str", None), str):
+            ref_tokens = row["tokens_str"].split()
+        else:
+            ref_tokens = str(row["utter_clean"]).split()
+
+        # generate
+        gen_ids = model.greedy_decode(
+            image=img,
+            emo_id=emo,
+            sos_idx=sos_idx,
+            eos_idx=eos_idx,
+            max_len=args.max_gen_len,
+            device=device,
+        )
+        hyp_tokens = ids_to_tokens(gen_ids, idx2tok, eos_idx, pad_idx)
+        if len(hyp_tokens) == 0:
+            continue
+
+        references.append(ref_tokens)
+        hypotheses.append(hyp_tokens)
+
+        if NLTK_AVAILABLE:
+            meteor_refs.append(" ".join(ref_tokens))
+            meteor_hyps.append(" ".join(hyp_tokens))
+
+    print(f"[{emb_type}] Collected {len(hypotheses)} hypothesis–reference pairs.")
+
+    # BLEU
+    if references and hypotheses:
+        bleu1 = corpus_bleu(
+            [[r] for r in references], hypotheses,
+            weights=(1.0, 0.0, 0.0, 0.0),
+            smoothing_function=smoothie,
+        )
+        bleu4 = corpus_bleu(
+            [[r] for r in references], hypotheses,
+            weights=(0.25, 0.25, 0.25, 0.25),
+            smoothing_function=smoothie,
+        )
+    else:
+        bleu1 = bleu4 = 0.0
+
+    # ROUGE-1 / ROUGE-L
+    rouge1_f_list, rougeL_f_list = [], []
+    for hyp, ref in zip(hypotheses, references):
+        _, _, f1_1 = simple_rouge_1(hyp, ref)
+        _, _, f1_L = simple_rouge_l(hyp, ref)
+        rouge1_f_list.append(f1_1)
+        rougeL_f_list.append(f1_L)
+
+    rouge1_f = float(np.mean(rouge1_f_list)) if rouge1_f_list else 0.0
+    rougeL_f = float(np.mean(rougeL_f_list)) if rougeL_f_list else 0.0
+
+    # METEOR (optional)
+    meteor_avg = None
+    if NLTK_AVAILABLE and meteor_refs:
+        try:
+            scores = [meteor_score([r], h) for r, h in zip(meteor_refs, meteor_hyps)]
+            meteor_avg = float(np.mean(scores))
+        except Exception:
+            meteor_avg = None
+
+    # qualitative examples
+    print(f"\n[{emb_type}] Sample qualitative generations:")
+    num_show = min(args.num_examples, len(hypotheses))
+    for i in range(num_show):
+        ref = " ".join(references[i])
+        hyp = " ".join(hypotheses[i])
+        print(f"  Example {i+1}:")
+        print(f"    REF: {ref}")
+        print(f"    HYP: {hyp}")
+
+    results = {
+        "embedding_type": emb_type,
+        "bleu1": float(bleu1),
+        "bleu4": float(bleu4),
+        "rouge1_f": rouge1_f,
+        "rougeL_f": rougeL_f,
+        "meteor": meteor_avg,
+        "num_pairs": len(hypotheses),
+    }
+    print(f"\n[{emb_type}] metrics:")
+    print(json.dumps(results, indent=2))
+    return results
+
+
+# ----------------------- Main -----------------------
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Evaluate VLT (Model 2) for multiple embedding types.")
+    p.add_argument("--checkpoints-root", type=str, default="new_checkpoints",
+                   help="Root folder with subdirs random/, glove/, fasttext/")
+    p.add_argument("--embedding-types", type=str, nargs="+",
+                   default=["random", "glove", "fasttext"])
+    p.add_argument("--csv", type=str, default="new_preprocessed/artemis_preprocessed.csv")
+    p.add_argument("--features-root", type=str, default="new_preprocessed/features")
+    p.add_argument("--vocab", type=str, default="new_preprocessed/vocab.pkl")
+    p.add_argument("--split", type=str, default="test")
+    p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--max_gen_len", type=int, default=25)
+    p.add_argument("--num_examples", type=int, default=5)
+
+    # Fallback config params (only used if not in checkpoint)
+    p.add_argument("--image_size", type=int, default=224)
+    p.add_argument("--patch_size", type=int, default=32)
+    p.add_argument("--vit_embed_dim", type=int, default=256)
+    p.add_argument("--vit_depth", type=int, default=2)
+    p.add_argument("--vit_num_heads", type=int, default=4)
+    p.add_argument("--decoder_embed_dim", type=int, default=256)
+    p.add_argument("--decoder_depth", type=int, default=2)
+    p.add_argument("--decoder_num_heads", type=int, default=4)
+    p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--num_emotions", type=int, default=9)
+
+    p.add_argument("--out-json", type=str, default="eval_outputs/m2_eval_summary.json")
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    os.makedirs(osp.dirname(args.out_json), exist_ok=True)
+
+    tok2idx, idx2tok, pad_idx, sos_idx, eos_idx = load_vocab(args.vocab)
+    print("Vocab size:", len(tok2idx))
+    print("PAD idx:", pad_idx, "SOS idx:", sos_idx, "EOS idx:", eos_idx)
+
+    all_results = []
+    for emb in args.embedding_types:
+        res = evaluate_for_embedding(
+            emb, args, tok2idx, idx2tok, pad_idx, sos_idx, eos_idx
+        )
+        if res:
+            all_results.append(res)
+
+    summary = {
+        "results": all_results,
+    }
+    with open(args.out_json, "w") as f:
+        json.dump(summary, f, indent=2)
+    print("\nSaved evaluation summary to:", args.out_json)
+
 
 if __name__ == "__main__":
     main()
