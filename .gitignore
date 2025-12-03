@@ -10,4 +10,5 @@ checkpoints/m2/
 checkpoints/model2/
 eval_outputs/model2/
 new_preprocessed/
+new_checkpoints/
 
