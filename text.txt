@@ -70,3 +70,38 @@ Hi,
 Please prepare a 10 minutes presentation for the Assignment 3.
 The presentation should include all the efforts you did, architecture, results, and analysis. (Note: You can have as many number slides as per your convenience taking into account the time limit)
 In the next 10 mins, we will share few images and emotions, your task will be to execute it and show the generated captions from the two models. You can create a predict.py file that takes these inputs, do the pre-processing and generate the results from the trained models.
+
+
+
+5. Model 1 – CNN + LSTM Network 
+Architecture 
+●  Use a custom CNN (that is not pretrained) as the image encoder to extract image_features with multiple convolutional and pooling layers.  
+●  Output a compact image feature vector (256D).  
+●  Build an LSTM or BiLSTM network to generate captions word by word (sequence to sequence approach) 
+●  Inputs: emotion embedding+ caption word embedding + image_feature vector.  
+●  Outputs: Next word in the sequence. 
+
+
+using the combined vector, to initialize the lstm's hidden and cell state 
+fusing the image feature, emotion vector and the word embedding at each step as input to the lstm 
+allowing lstm to focus on image regions or emotional features as it generates each word of the caption
+
+
+●  tell me how too Experiment with:   
+○  Hidden sizes (e.g., 128, 256) 
+○  Dropout layers  
+Training Objective 
+●  Use Categorical Cross-Entropy Loss (mask padding tokens).  
+●  Optimize using Adam optimizers.  
+●  Track training and validation loss per epoch and save it as a summary json 
+
+Evaluation 
+●  Generate captions for test images, with different emotions  
+●  Compare generated vs. ground truth captions using metrics like BLEU, ROUGE, and CIDEr.  
+●  Display a few sample images with their predicted captions, ground truth and emotion.   
+
+
+Experiment:
+hidden layer 128,256,512: larger sizes capture more complex dependencies but increase training time and risk overfitting 
+dropout layer : lstm dropout to the output before the linear layer is 0.3-0.5 
+ 

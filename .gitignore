@@ -8,7 +8,9 @@ checkpoints/m1/
 checkpoints/model1/
 checkpoints/m2/
 checkpoints/model2/
-eval_outputs/model2/
+eval_outputs/model2
+eval_outputs/results_cnn_lstm/best_model.pth
 new_preprocessed/
 new_checkpoints/
+__pycache__
 

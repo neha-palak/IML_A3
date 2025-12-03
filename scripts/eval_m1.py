@@ -1,94 +1,313 @@
-"""
-evaluate_m1.py
-
-Loads best checkpoint for Model1 and runs greedy decoding on the test split,
-computes BLEU and ROUGE-L for a subset of images, prints sample predictions.
-"""
-import argparse
-import numpy as np
-from tqdm import tqdm
 import torch
+import pickle
+import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from model1_cnn import load_vocab, ArtEmisDataset, collate_fn, CaptionModel  # import from training script
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-from rouge_score import rouge_scorer
+import numpy as np
+import pandas as pd
+import os.path as osp
+import json
+from collections import defaultdict
+from tqdm import tqdm
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction 
+import os
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-TFIDF_DIR = "data_preprocessed/tfidf_npy"
-TEST_CSV = "data_preprocessed/test.csv"
-FEATURES_DIR = "data_preprocessed/features"
-VOCAB_PATH = "data_preprocessed/vocab.pkl"
-MAX_SEQ_LEN = 25
-checkpoint_path= "checkpoints/m1_pt/m1_best.pt"
+# --- Import models and dataset from M1.py (Assuming M1.py contains the correct definitions) ---
+from M1 import (
+    CustomCNNEncoder, 
+    EmotionLSTMDecoder, 
+    ArtemisCaptioningDataset, 
+    get_embedding_matrix, 
+    CONFIG, 
+    device, 
+    PAD_TOKEN_ID, 
+    START_TOKEN_ID, 
+    END_TOKEN_ID, 
+    VOCAB_SIZE 
+)
 
-def evaluate(checkpoint_path, embedding, max_samples=200):
-    device = torch.device(DEVICE)
-    ckpt = torch.load(checkpoint_path, map_location=device)
-    config = ckpt.get("config", {})
-    tfidf_dim = config.get("tfidf_dim", 0)
+# Define the file path for history storage
+HISTORY_PATH = osp.join(CONFIG["RESULTS_DIR"], "evaluation_history.json")
 
-    vocab = load_vocab(VOCAB_PATH)
-    idx2tok = {v: k for k, v in vocab.items()}
-    pad_idx = vocab.get("<pad>", 0)
-    sos_idx = vocab.get("<start>", 1)
-    eos_idx = vocab.get("<end>", None)
+# Global function to load vocab
+def load_vocab_dict(vocab_path):
+    with open(vocab_path, "rb") as f:
+        tok2idx = pickle.load(f)
+    if not isinstance(tok2idx, dict) and hasattr(tok2idx, "token_to_idx"):
+        tok2idx = tok2idx.token_to_idx
+    idx2tok = {i: t for t, i in tok2idx.items()}
+    return tok2idx, idx2tok
 
-    model = CaptionModel(
-        vocab_size=len(vocab),
-        embedding_type=embedding,
-        embedding_matrix_path=None if embedding not in ("glove","fasttext") else ("data_preprocessed/emb_glove_300d.npy" if embedding=="glove" else "data_preprocessed/emb_fasttext_300d.npy"),
-        tfidf_dim=tfidf_dim if tfidf_dim>0 else None,
-        embed_dim=config.get("embed_dim", 300),
-        image_feat_dim=256,
-        emo_dim=config.get("emo_dim", 64),
-        lstm_hidden=config.get("lstm_hidden", 256),
-        num_emotions=config.get("num_emotions", 9)
-    ).to(device)
-    model.load_state_dict(ckpt["model_state"])
-    model.eval()
+## ----------------------------------------------------
+## 1. CAPTION GENERATION (BEAM SEARCH)
+## ----------------------------------------------------
 
-    test_ds = ArtEmisDataset(TEST_CSV, FEATURES_DIR, "test", use_tfidf=(embedding=="tfidf"), tfidf_dir=TFIDF_DIR, max_len=MAX_SEQ_LEN)
-    test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, collate_fn=collate_fn)
+def beam_search_decode(encoder, decoder, image_data, emotion_label, max_len, idx2tok, start_token_id, end_token_id, emotion_word_ids, beam_size=5):
+    """
+    Performs beam search decoding for a single image and emotion pair.
+    
+    Now accepts a list of emotion_word_ids to filter the generated output.
+    """
+    encoder.eval()
+    decoder.eval()
+    
+    # 1. Get Image Features (Pass single item)
+    image_features = encoder(image_data.unsqueeze(0).to(device)) # (1, D_img)
+    emotion_label = emotion_label.unsqueeze(0).to(device) # (1)
+    
+    # 2. Initialize LSTM state
+    h, c, emotion_vec = decoder.init_hidden_state(image_features, emotion_label) 
+    
+    # Beams: [(log_prob, [word_ids], h, c)]
+    beams = [(0.0, [start_token_id], h, c)] 
+    final_captions = []
+    
+    for _ in range(max_len):
+        candidates = []
+        
+        for score, current_caption, h_t, c_t in beams:
+            last_word_id = current_caption[-1]
+            
+            if last_word_id == end_token_id: 
+                final_captions.append((score, current_caption)) 
+                continue 
+            
+            # 3. Single LSTM Step
+            input_token = torch.tensor([[last_word_id]], device=device)
+            word_embed = decoder.word_embeddings(input_token)
+            word_embed = decoder.dropout_word(word_embed)
 
-    bleu_smooth = SmoothingFunction().method1
-    rouge = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+            image_context = image_features.unsqueeze(1) 
+            emotion_context = emotion_vec.unsqueeze(1)
+            fused_input = torch.cat((word_embed, image_context, emotion_context), dim=2)
 
-    bleu_scores = []
-    rouge_scores = []
-    for i, (imgs, toks, emos, tfidf) in enumerate(tqdm(test_loader, total=min(len(test_ds), max_samples))):
-        if i >= max_samples:
+            output, (h_next, c_next) = decoder.lstm(fused_input, (h_t, c_t))
+            
+            log_probs = F.log_softmax(decoder.output_layer(output.squeeze(1)), dim=-1) # (1, VocabSize)
+            
+            topk_log_probs, topk_ids = log_probs.topk(beam_size)
+            
+            for i in range(beam_size):
+                word_id = topk_ids.squeeze(0)[i].item()
+                log_prob = topk_log_probs.squeeze(0)[i].item()
+                
+                new_score = score + log_prob
+                new_caption = current_caption + [word_id]
+                
+                h_next_clone = h_next.clone() 
+                c_next_clone = c_next.clone()
+                
+                candidates.append((new_score, new_caption, h_next_clone, c_next_clone))
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        beams = candidates[:beam_size]
+        
+        if len(final_captions) >= beam_size:
             break
-        imgs = imgs[0]
-        emo_id = int(emos[0].item())
-        tfidf_vec = tfidf[0] if tfidf is not None else None
 
-        pred_ids = model.greedy_decode(imgs, emo_id, sos_idx, eos_idx=eos_idx, max_len=MAX_SEQ_LEN, tfidf_vec=(tfidf_vec if embedding=="tfidf" else None), device=device)
-        pred_tokens = [idx2tok.get(int(x), "<unk>") for x in pred_ids]
-        ref_ids = toks[0].tolist()
-        ref_tokens = [idx2tok.get(int(x), "<unk>") for x in ref_ids if x not in (pad_idx, sos_idx, eos_idx)]
+    final_captions.extend([(s, c) for s, c, _, _ in beams])
+    final_captions.sort(key=lambda x: x[0], reverse=True)
+    
+    if not final_captions:
+        return "Caption generation failed."
+        
+    best_caption_ids = final_captions[0][1]
+    
+    # FIX: Remove special tokens AND the initial emotion token (if present)
+    caption_tokens = []
+    first_word_skipped = False
+    
+    for i in best_caption_ids:
+        if i in [start_token_id, end_token_id, PAD_TOKEN_ID]:
+            continue
+        
+        # Check if it's the first word generated after <start> and if it's an emotion word
+        if not first_word_skipped and i in emotion_word_ids:
+            first_word_skipped = True
+            continue
+            
+        caption_tokens.append(idx2tok[i])
+        first_word_skipped = True # All subsequent words are not the 'first word'
+    
+    return " ".join(caption_tokens)
 
-        try:
-            bleu = sentence_bleu([ref_tokens], pred_tokens, smoothing_function=bleu_smooth)
-        except Exception:
-            bleu = 0.0
-        rouge_l = rouge.score(" ".join(ref_tokens), " ".join(pred_tokens))['rougeL'].fmeasure
 
-        bleu_scores.append(bleu)
-        rouge_scores.append(rouge_l)
+## ----------------------------------------------------
+## 2. MAIN EVALUATION FUNCTION
+## ----------------------------------------------------
 
-        if i < 5:
-            print("\nSample", i)
-            print("Ref :", " ".join(ref_tokens))
-            print("Pred:", " ".join(pred_tokens))
+def load_history():
+    if osp.exists(HISTORY_PATH):
+        with open(HISTORY_PATH, 'r') as f:
+            return json.load(f)
+    return {}
 
-    print("\nAverage BLEU:", float(np.mean(bleu_scores)) if bleu_scores else 0.0)
-    print("Average ROUGE-L:", float(np.mean(rouge_scores)) if rouge_scores else 0.0)
+def save_history(history):
+    os.makedirs(CONFIG["RESULTS_DIR"], exist_ok=True)
+    with open(HISTORY_PATH, 'w') as f:
+        json.dump(history, f, indent=4)
 
+def evaluate_model():
+    print(f"Using device: {device}")
+    
+    tok2idx, idx2tok = load_vocab_dict(CONFIG["VOCAB_PATH"])
+    
+    checkpoint_path = osp.join(CONFIG["RESULTS_DIR"], "best_model.pth")
+    if not osp.exists(checkpoint_path):
+        print(f"Error: Checkpoint not found at {checkpoint_path}. Run training first.")
+        return
+
+    # Load checkpoint
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Re-initialize models using saved config
+    emb_matrix, emb_dim, _, _ = get_embedding_matrix(
+        checkpoint['config']["EMBEDDING_TYPE"], 
+        vocab_path=checkpoint['config']["VOCAB_PATH"],
+        repr_dir=osp.dirname(checkpoint['config']["PREPROCESSED_CSV"])
+    )
+    current_config = checkpoint['config']
+    current_config["EMBEDDING_DIM"] = emb_dim if emb_dim is not None else current_config["EMOTION_DIM"]
+
+    encoder = CustomCNNEncoder(output_dim=current_config["IMAGE_FEATURE_DIM"]).to(device)
+    decoder = EmotionLSTMDecoder(
+        vocab_size=len(tok2idx),
+        embed_dim=current_config["EMBEDDING_DIM"],
+        hidden_size=current_config["HIDDEN_SIZE"],
+        num_emotions=current_config["NUM_EMOTIONS"],
+        image_feature_dim=current_config["IMAGE_FEATURE_DIM"],
+        dropout_rate=current_config["DROPOUT_RATE"],
+        embedding_matrix=emb_matrix
+    ).to(device)
+
+    encoder.load_state_dict(checkpoint['encoder_state_dict'])
+    decoder.load_state_dict(checkpoint['decoder_state_dict'])
+    
+    val_loss = checkpoint['best_val_loss']
+    print(f"Loaded model from Val Loss: {val_loss:.4f}")
+
+    # Prepare Emotion ID list for filtering
+    EMOTION_WORDS = ["amusement", "contentment", "awe", "excitement", "fear", "anger", "sadness", "disgust", "something else"]
+    EMOTION_WORD_IDS = {tok2idx.get(w) for w in EMOTION_WORDS}
+    
+    # Load test data
+    test_data = ArtemisCaptioningDataset(
+        CONFIG["PREPROCESSED_CSV"], 'test', CONFIG["IMAGE_FEAT_DIR"], CONFIG["VOCAB_PATH"]
+    )
+    test_loader = DataLoader(test_data, batch_size=1, shuffle=False) 
+    
+    predictions = []
+    gts = defaultdict(list) 
+    EMOTION_ID_TO_WORD = {i: t for t, i in zip(EMOTION_WORDS, range(current_config["NUM_EMOTIONS"]))}
+
+    print("Generating captions for the test set...")
+    
+    for image_data, emotion_labels, _, caption_target_tokens, painting_id in tqdm(test_loader, desc="Generating Captions"):
+        
+        emotion_label = emotion_labels.squeeze(0).item() 
+        image_data = image_data.squeeze(0)
+        
+        # 1. Generate Caption using beam search
+        predicted_caption_str = beam_search_decode(
+            encoder, decoder, 
+            image_data, 
+            torch.tensor(emotion_label, dtype=torch.long), 
+            max_len=CONFIG["MAX_LEN"], 
+            idx2tok=idx2tok,
+            start_token_id=START_TOKEN_ID, 
+            end_token_id=END_TOKEN_ID,
+            emotion_word_ids=EMOTION_WORD_IDS, # Pass the set of emotion IDs for filtering
+            beam_size=5
+        )
+        
+        # 2. Get Ground Truths
+        gt_df = test_data.df[(test_data.df['painting'] == painting_id[0]) & (test_data.df['emotion_label'] == emotion_label)]
+        ground_truth_strs = gt_df['utter_clean'].tolist()
+        
+        # 3. Store Results
+        result_key = f"{painting_id[0]}_{emotion_label}"
+        predictions.append({
+            "image_id": result_key,
+            "caption": predicted_caption_str,
+            "emotion": EMOTION_ID_TO_WORD.get(emotion_label, "Unknown")
+        })
+        
+        for j, gt_text in enumerate(ground_truth_strs):
+            gts[result_key].append({
+                "image_id": result_key,
+                "cap_id": j,
+                "caption": gt_text
+            })
+
+    # Save predictions JSON (required format for pycocoevaltool)
+    pred_path = osp.join(CONFIG["RESULTS_DIR"], "predictions.json")
+    with open(pred_path, 'w') as f:
+        json.dump(predictions, f, indent=4)
+    print(f"Saved predictions to {pred_path}")
+
+    # Save ground truth JSON (required format for pycocoevaltool)
+    gt_list = [item for sublist in gts.values() for item in sublist]
+    gt_path = osp.join(CONFIG["RESULTS_DIR"], "ground_truths.json")
+    with open(gt_path, 'w') as f:
+        json.dump({"annotations": gt_list}, f, indent=4)
+        
+    ## 3. METRIC CALCULATION (Simplified NLTK BLEU-4)
+    print("\n--- Evaluation Metrics ---")
+    chencherry = SmoothingFunction()
+    total_bleu4 = 0
+    count = 0
+    
+    for pred in predictions:
+        img_id = pred['image_id']
+        pred_tokens = pred['caption'].split()
+        references = [ann['caption'].split() for ann in gts[img_id]]
+        
+        if references:
+            total_bleu4 += sentence_bleu(references, pred_tokens, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=chencherry.method1)
+            count += 1
+            
+    if count > 0:
+        avg_bleu4 = total_bleu4 / count
+        print(f"**Simplified Average NLTK BLEU-4:** {avg_bleu4:.4f}")
+    else:
+        avg_bleu4 = 0.0
+
+    print("\nTo get official metrics (ROUGE-L, CIDEr), use the COCO Evaluation toolkit on the saved JSON files.")
+
+    ## 4. HISTORY STORAGE
+    eval_history = load_history()
+    embedding_key = current_config["EMBEDDING_TYPE"]
+    
+    # Store the results under the embedding type used
+    if embedding_key not in eval_history:
+        eval_history[embedding_key] = []
+        
+    eval_history[embedding_key].append({
+        "timestamp": pd.Timestamp.now().isoformat(),
+        "val_loss": val_loss,
+        "bleu_4": avg_bleu4,
+        "image_feature_dim": current_config["IMAGE_FEATURE_DIM"],
+        "hidden_size": current_config["HIDDEN_SIZE"]
+    })
+    
+    save_history(eval_history)
+    print(f"\nEvaluation history saved to {HISTORY_PATH}")
+
+    ## 5. DISPLAY SAMPLES
+    print("\n--- Sample Captions ---")
+    num_samples = min(5, len(predictions))
+    
+    for i in range(num_samples):
+        sample = predictions[i]
+        gt_sample = gts[sample['image_id']][0]['caption']
+        print(f"Image ID: {sample['image_id']}")
+        print(f"Emotion Target: {sample['emotion']}")
+        print(f"Predicted Caption: {sample['caption']}")
+        print(f"Ground Truth:      {gt_sample}")
+        print("-" * 30)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, help="Path to checkpoint (m1_best.pt)")
-    parser.add_argument("--embedding", choices=["glove", "fasttext", "tfidf", "trainable"], default="glove")
-    parser.add_argument("--max_samples", type=int, default=200)
-    args = parser.parse_args()
-    evaluate(args.checkpoint, args.embedding, max_samples=args.max_samples)
+    evaluate_model()
