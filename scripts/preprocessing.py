@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-preprocessing.py
-
-Produces a single CSV file: artemis_preprocessed.csv which contains:
- - original text/tokens/token_ids
- - emotion-prepended text/tokens/token_ids (stringified lists for CSV compatibility)
- - split column (train/val/test)
-Also saves vocab.pkl and preprocessing_summary.json.
-"""
-
 import os
 import os.path as osp
 import argparse
@@ -19,27 +8,14 @@ import re
 from pathlib import Path
 from collections import Counter
 from math import floor
-
 import numpy as np
 import pandas as pd
 from PIL import Image
 from tqdm import tqdm
+import spacy  #python3 -m spacy download en_core_web_sm
+nlp = spacy.load("en_core_web_sm", disable=["parser", "ner", "textcat"])
 
-# ----------------------------
-# Try spaCy (require en_core_web_sm)
-# ----------------------------
-try:
-    import spacy
-    try:
-        nlp = spacy.load("en_core_web_sm", disable=["parser", "ner", "textcat"])
-    except OSError:
-        raise RuntimeError("spaCy model 'en_core_web_sm' not found. Run: python3 -m spacy download en_core_web_sm")
-except Exception as e:
-    raise RuntimeError("spaCy is required. Install with: python3 -m pip install spacy && python3 -m spacy download en_core_web_sm") from e
-
-# ----------------------------
-# Utilities
-# ----------------------------
+#data cleaning 
 SPECIAL_TOKENS = ["<pad>", "<start>", "<end>", "<unk>"]
 
 def clean_text(s: str) -> str:
@@ -50,8 +26,7 @@ def clean_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-def tokenize_spacy_batch(texts):
-    """Tokenize a list of texts using spaCy efficiently (nlp.pipe)."""
+def tokenize_spacy_batch(texts): #tokenizes using spacy
     toks = []
     for doc in nlp.pipe(texts, batch_size=256, disable=["parser", "ner", "textcat"]):
         toks.append([t.text.lower() for t in doc if not t.is_space])
@@ -66,7 +41,6 @@ def stratified_subsample_by_style(df, target_n, seed=42):
     alloc = {s: floor(v) for s, v in ideal.items()}
     remainder = target_n - sum(alloc.values())
 
-    # allocate remainders by largest fractional parts
     fracs = sorted([(s, ideal[s] - alloc[s]) for s in alloc], key=lambda x: -x[1])
     i = 0
     while remainder > 0 and fracs:
@@ -138,9 +112,6 @@ def encode_tokens(tokens, token_to_idx, max_len):
         ids = ids[:max_len]
     return ids
 
-# ----------------------------
-# Main function
-# ----------------------------
 def main(args):
     os.makedirs(args.out_dir, exist_ok=True)
     images_out = osp.join(args.out_dir, "images_subset")
@@ -158,7 +129,7 @@ def main(args):
     df = pd.read_csv(args.raw_csv)
     print("Rows loaded:", len(df))
 
-    # Optional dedup
+    # deduplicate
     if args.dedup:
         before = len(df)
         df = df.drop_duplicates(subset=['painting','utterance']).reset_index(drop=True)
@@ -344,7 +315,7 @@ def parse_args():
     p.add_argument("--copy-images", action="store_false", dest="copy_images",
                help="disable copying images")
     p.set_defaults(copy_images=True)    
-    p.add_argument("--image-size", type=int, default=224)
+    p.add_argument("--image-size", type=int, default=128)
     p.add_argument("--max-len", type=int, default=25, help="max tokens (including <start>/<end>)")
     p.add_argument("--min-len", type=int, default=3, help="min token length (after tokenization)")
     p.add_argument("--max-vocab-size", type=int, default=8000)

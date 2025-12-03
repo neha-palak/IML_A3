@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 evaluate_m1.py
 
@@ -20,6 +19,7 @@ TEST_CSV = "data_preprocessed/test.csv"
 FEATURES_DIR = "data_preprocessed/features"
 VOCAB_PATH = "data_preprocessed/vocab.pkl"
 MAX_SEQ_LEN = 25
+checkpoint_path= "checkpoints/m1_pt/m1_best.pt"
 
 def evaluate(checkpoint_path, embedding, max_samples=200):
     device = torch.device(DEVICE)
@@ -87,7 +87,7 @@ def evaluate(checkpoint_path, embedding, max_samples=200):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint (m1_best.pt)")
+    parser.add_argument("--checkpoint", type=str, help="Path to checkpoint (m1_best.pt)")
     parser.add_argument("--embedding", choices=["glove", "fasttext", "tfidf", "trainable"], default="glove")
     parser.add_argument("--max_samples", type=int, default=200)
     args = parser.parse_args()

@@ -1,12 +1,9 @@
-#!/usr/bin/env python3
 """
-model_cnn1.py
-
 Train Model 1: Custom CNN encoder + LSTM decoder with emotion conditioning.
 
 Supports word representation choices:
-  - glove: loads data_preprocessed/emb_glove_...npy
-  - fasttext: loads data_preprocessed/emb_fasttext_...npy
+  - glove: loads data_preprocessed/emb_glove_300.npy
+  - fasttext: loads data_preprocessed/emb_fasttext_300.npy
   - tfidf: uses per-row tfidf vectors saved as data_preprocessed/tfidf_npy/{split}__{idx:06d}.npy
 
 Assumptions (match your preprocessing):
@@ -40,8 +37,8 @@ VOCAB_PATH = os.path.join(DATA_DIR, "vocab.pkl")
 TRAIN_CSV = os.path.join(DATA_DIR, "train.csv")
 VAL_CSV = os.path.join(DATA_DIR, "val.csv")
 TEST_CSV = os.path.join(DATA_DIR, "test.csv")
-CHECKPOINT_DIR = "checkpoints/m1"
-HISTORY_PATH = os.path.join(CHECKPOINT_DIR, "history.json")
+CHECKPOINT_DIR = "checkpoints/m1_pt"
+HISTORY_PATH = os.path.join("checkpoints/summary", "cnn_history.json")
 
 # Training hyperparams
 NUM_EPOCHS = 4

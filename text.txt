@@ -17,6 +17,50 @@ concatenate token_emotions + token_c1
 mention which one is best in vlt_history.json
 
 
+
+# ✅ **LIST OF ALL CORRECTIONS YOU MUST MAKE**
+
+### **Model Architecture**
+* increase CNN layer by one
+* Do NOT feed image features at every timestep.
+* Use image features only to initialize the LSTM hidden state.
+* Remove TF-IDF-based embeddings from the decoder.
+* Use proper learned word embeddings (or GloVe/FastText).
+* Fix LSTM input shape (token embedding only).
+* Fix hidden state handling: keep `(h, c)` across decoding steps.
+
+### **Training**
+
+* Train for more epochs (20–40).
+* Remove `<pad>`, `<start>`, `<end>` from prediction targets.
+* Apply loss masking so padded tokens do not contribute to loss.
+* Ensure image features are correctly precomputed and loaded.
+* Ensure emotions are encoded correctly and consistently.
+* Ensure teacher forcing is correctly implemented.
+
+### **Decoding (Greedy)**
+
+* Decode **one step at a time**, not the entire sequence each loop.
+* At each step, feed **only the last predicted token**, not the full history.
+* Preserve LSTM hidden state between steps.
+* Stop when `<end>` token is predicted.
+* Do not repetitively recompute the entire LSTM from scratch.
+
+### **Dataset + Preprocessing**
+
+* Remove special tokens from reference captions before evaluation.
+* Ensure padding happens after `<end>` token positions only.
+* Validate that `features/{painting}.npy` contains extracted CNN features, not raw images.
+* Ensure text vocabulary excludes `<pad>` from training loss.
+* Ensure consistent max sequence length between train and eval.
+
+### **Evaluation**
+
+* Clean both hypothesis and reference captions (remove special tokens).
+* Ensure both are tokenized consistently before BLEU/ROUGE.
+* Check maximum sample count logic.
+
+
 Hi students,
 For Assignment 3, I got few concerns that students have misunderstood the inputs of the model. As a matter of clarity, there are two inputs - image (WikiArt dataset) and emotion (Artemis dataset) and Output - caption (Artemis dataset).
 
