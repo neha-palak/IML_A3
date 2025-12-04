@@ -13,6 +13,9 @@ Each model supports three text embedding strategies:
 
 The project includes full preprocessing, training, evaluation, prediction, and attention visualization tools.
 
+REPO STRUCTURE
+* ```eval_outputs/results_cnn_lstm```: contains best CNN+LSTM model for each embedding type and training history, summary, metrics
+* ``` new_checkpoints```: contains a folder for each embedding type, which contains the best model and training history for the respective embedding type. It has overall the model metrics
 
 2. Dataset Preprocessing
 
@@ -82,13 +85,15 @@ new_checkpoints/<embedding>/m2_<embedding>_best.pt
 2: transformer
 
 ```
-python scripts/eval_m{1/2}.py
+python scripts/eval_m1.py
+python scripts/eval_m2.py
+
 
 ```
 Outputs:
 ```
-eval_outputs/m{1/2}_eval_summary.json
-eval_outputs/m{1/2}_eval_samples.json
+eval_outputs/results_cnn_lstm/m1_eval_summary.json
+new_checkpoints/m2_eval_summary.json
 ```
 Metrics:
 	•	BLEU-4
@@ -99,12 +104,14 @@ Metrics:
 
 5. Predict
 
-```ArtEmis_Caption_Generation.ipynb``` calls the ```predict_single_image``` function from ```viva_predict.py``` file, which we created to generate captions for any images, and not just images from our subsampled folder
+```ArtEmis_Caption_Generation.ipynb``` calls the ```predict_single_image``` function from ```viva_predict.py``` file, which we created to generate captions for any images, and not just images from our subsampled folder.
+
 ```predict.py``` can only be used to generate captions for images in the ```new_preprocessed/images_subset``` folder
+
+Steps to generate captions:
 * Inside the ```ArtEmis_Caption_Generation.ipynb```, scroll to the 'FINAL CAPTION GENERATION' section
 * Save the desired image in 'viva_images' folder as .jpg
 * Put the name of the image in 'IMAGE_NAME' variable
 * Imput the desired EMOTION_ID
 * Run the script
 * It generated captions for both the models per embedding type
-![alt text](image.png)

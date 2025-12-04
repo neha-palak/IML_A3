@@ -275,25 +275,42 @@ def visualize_sample(
 
 
     print("\nVisualizing attention maps...")
-    for wi, w in enumerate(words[:max_words]):
-        t_pos = wi + 1  # +1 because 0 is emotion position
-        if t_pos >= attn_last.size(0):
-            break
 
-        # attention over encoder tokens (CLS + patches)
-        att_vec = attn_last[t_pos]  # (S,)
-        # drop CLS token (index 0), keep patch tokens
-        patch_attn = att_vec[1:1 + num_patches]  # (P,)
+    words_to_show = words[:max_words]
+    num_words = len(words_to_show)
+    cols = 4
+    rows = int(np.ceil(num_words / cols))
+
+    fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 4*rows))
+    axes = np.array(axes).reshape(rows, cols)
+
+    for i, w in enumerate(words_to_show):
+        t_pos = i + 1  # skip emotion token position
+        if t_pos >= attn_last.size(0):
+            continue
+
+        att_vec = attn_last[t_pos]
+        patch_attn = att_vec[1:1 + num_patches]
 
         heat = upsample_attention(patch_attn, img_h, img_w, num_patches)
 
-        print(f"  Word {wi}: {w}")
-        plt.figure(figsize=(4, 4))
-        plt.imshow(img_arr)
-        plt.imshow(heat, cmap="jet", alpha=0.45)
-        plt.axis("off")
-        plt.title(f"Attention for: '{w}'")
-        plt.show()
+        r = i // cols
+        c = i % cols
+        ax = axes[r, c]
+
+        ax.imshow(img_arr)
+        ax.imshow(heat, cmap="jet", alpha=0.45)
+        ax.set_title(f"'{w}'")
+        ax.axis("off")
+
+    # turn off any unused cells
+    for j in range(num_words, rows * cols):
+        r = j // cols
+        c = j % cols
+        axes[r, c].axis("off")
+
+    plt.tight_layout()
+    plt.show()
 
 
 # ----------------- CLI -----------------

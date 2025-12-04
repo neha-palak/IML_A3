@@ -30,18 +30,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-# inside scripts/transformers.py, near the top
 try:
-    # when used as a package (e.g. from scripts.viva_predict import ...)
     from scripts.embedding_utils import get_embedding_matrix
 except ImportError:
-    # when running from inside scripts/ directly: python3 scripts/model2_vlt_embed.py
     from embedding_utils import get_embedding_matrix
 
-
-# ---------------------------
-# Dataset
-# ---------------------------
 
 class CaptionDatasetVLT(Dataset):
     """
@@ -73,7 +66,6 @@ class CaptionDatasetVLT(Dataset):
         if isinstance(s, str):
             s = s.strip()
             try:
-                # from preprocessing: it's already a python-list-string like "[1, 4, ...]"
                 if s.startswith("[") and s.endswith("]"):
                     ids = literal_eval(s)
                 else:
@@ -112,9 +104,6 @@ class CaptionDatasetVLT(Dataset):
         return img, token_ids, emo
 
 
-# ---------------------------
-# Model components
-# ---------------------------
 
 def sinusoidal_positional_encoding(n_pos: int, d_model: int):
     pe = torch.zeros(n_pos, d_model)
@@ -139,20 +128,16 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
-        """
-        x: (B,3,H,W)
-        returns: (B, N, embed_dim)
-        """
-        x = self.proj(x)              # (B, E, H', W')
+        # (B, E, H', W')
+        x = self.proj(x)              
         B, E, Hn, Wn = x.shape
-        x = x.flatten(2).transpose(1, 2)  # (B, N, E)
+        # (B, N, E)
+        x = x.flatten(2).transpose(1, 2)  
         return x
 
 
 class VisionTransformerEncoder(nn.Module):
-    """
-    ViT-like encoder: patch embedding + TransformerEncoder + CLS token.
-    """
+    
 
     def __init__(self, img_size=128, patch_size=32,
                  embed_dim=256, depth=2, num_heads=4, dropout=0.1):
@@ -169,39 +154,35 @@ class VisionTransformerEncoder(nn.Module):
             nhead=num_heads,
             dim_feedforward=embed_dim * 4,
             dropout=dropout,
-            batch_first=False  # we will use (S,B,E)
+            batch_first=False  
         )
         self.encoder = nn.TransformerEncoder(layer, num_layers=depth)
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
-        """
-        x: (B,3,H,W)
-        returns: (B, S, D)   S = #patches + 1 (CLS)
-        """
+        
         B = x.size(0)
-        x = self.patch_embed(x)  # (B, N, D)
+        # (B, N, D)
+        x = self.patch_embed(x)  
         cls = self.cls_token.expand(B, -1, -1)
-        x = torch.cat([cls, x], dim=1)  # (B, N+1, D)
+        # (B, N+1, D)
+        x = torch.cat([cls, x], dim=1)  
 
-        pos = self.pos_embed.unsqueeze(0).to(x.device)  # (1, N+1, D)
+        pos = self.pos_embed.unsqueeze(0).to(x.device)
         if pos.size(1) != x.size(1):
             pos = pos[:, :x.size(1), :]
         x = x + pos
 
-        x = x.transpose(0, 1)    # (S, B, D)
+        # (S, B, D)
+        x = x.transpose(0, 1)    
         x = self.encoder(x)
-        x = self.norm(x.transpose(0, 1))  # (B, S, D)
+        # (B, S, D)
+        x = self.norm(x.transpose(0, 1))  
         return x
 
 
 class DecoderLayerCustom(nn.Module):
-    """
-    Custom Transformer decoder layer with:
-      - masked self-attention
-      - cross-attention to image encoder output
-      - feed-forward network
-    """
+
 
     def __init__(self, d_model, nhead, dim_feedforward=1024, dropout=0.1):
         super().__init__()
@@ -251,12 +232,7 @@ class TransformerDecoderCustom(nn.Module):
 
 
 class VisionLanguageTransformerEmotion(nn.Module):
-    """
-    Full VLT:
-      - VisionTransformerEncoder (image)
-      - Transformer decoder (text)
-      - Emotion embedding used as first decoder token
-    """
+   
 
     def __init__(self,
                  cfg,
@@ -299,7 +275,7 @@ class VisionLanguageTransformerEmotion(nn.Module):
                 self.token_embed.weight.data[:min_v, :min_d] = w[:min_v, :min_d]
         self.token_embed.weight.requires_grad = not freeze_token_emb
 
-        # Emotion embedding (same dim as tokens, we will prepend it)
+        # Emotion embedding
         self.num_emotions = cfg["num_emotions"]
         self.emotion_emb = nn.Embedding(self.num_emotions, D_dec)
         nn.init.xavier_uniform_(self.emotion_emb.weight)
@@ -321,49 +297,37 @@ class VisionLanguageTransformerEmotion(nn.Module):
         self.output_proj = nn.Linear(D_dec, vocab_size)
 
     def forward(self, images, token_ids, emo_ids):
-        """
-        images: (B,3,H,W)
-        token_ids: (B,T)
-        emo_ids: (B,)
-        Returns: logits: (B,T,V) aligned with input tokens
-        """
+    
         device = images.device
         B, T = token_ids.shape
 
         # encode image
-        mem = self.encoder(images)         # (B,S,D_enc)
-        mem = self.enc_to_dec(mem)         # (B,S,D_dec)
-        mem = mem.transpose(0, 1)          # (S,B,D_dec)
+        mem = self.encoder(images)         
+        mem = self.enc_to_dec(mem)        
+        mem = mem.transpose(0, 1)          
 
         # token + emotion embeddings
-        tok_emb = self.token_embed(token_ids)        # (B,T,D_dec)
-        emo_vec = self.emotion_emb(emo_ids)          # (B,D_dec)
-        emo_vec = emo_vec.unsqueeze(1)               # (B,1,D_dec)
+        tok_emb = self.token_embed(token_ids)     
+        emo_vec = self.emotion_emb(emo_ids)       
+        emo_vec = emo_vec.unsqueeze(1)            
 
-        # prepend emotion as first slot
-        dec_in = torch.cat([emo_vec, tok_emb], dim=1)    # (B,T+1,D_dec)
+        dec_in = torch.cat([emo_vec, tok_emb], dim=1)    
 
-        # add positional enc
-        pos = self.pos_embed_tokens[:T+1, :].unsqueeze(0).to(device)  # (1,T+1,D)
+        pos = self.pos_embed_tokens[:T+1, :].unsqueeze(0).to(device)  
         dec_in = dec_in + pos
 
-        # to (S,B,D) for MultiheadAttention
-        dec_in = dec_in.transpose(0, 1)   # (T+1,B,D_dec)
+        dec_in = dec_in.transpose(0, 1)   
 
-        # causal mask for decoder
         tgt_mask = torch.triu(torch.ones(T+1, T+1, device=device), diagonal=1).bool()
 
-        dec_out = self.decoder(dec_in, mem, tgt_mask=tgt_mask)  # (T+1,B,D)
-        dec_out = dec_out.transpose(0, 1)                       # (B,T+1,D)
+        dec_out = self.decoder(dec_in, mem, tgt_mask=tgt_mask)  
+        dec_out = dec_out.transpose(0, 1)                       
 
-        # we ignore the emotion position for prediction
-        logits = self.output_proj(dec_out[:, 1:, :])  # (B,T,V)
+        # ignore the emotion position for prediction
+        logits = self.output_proj(dec_out[:, 1:, :])  
         return logits
 
 
-# ---------------------------
-# Training helpers (with tqdm progress)
-# ---------------------------
 
 def train_one_epoch(model, loader, optimizer, device, pad_idx=0, epoch_idx=1, total_epochs=1):
     model.train()
@@ -379,11 +343,11 @@ def train_one_epoch(model, loader, optimizer, device, pad_idx=0, epoch_idx=1, to
         emos = emos.to(device)
 
         optimizer.zero_grad()
-        logits = model(imgs, token_ids, emos)  # (B,T,V)
+        logits = model(imgs, token_ids, emos)  
 
         # next token prediction
-        logits_in = logits[:, :-1, :]   # (B,T-1,V)
-        targets = token_ids[:, 1:]      # (B,T-1)
+        logits_in = logits[:, :-1, :]  
+        targets = token_ids[:, 1:]      
 
         B, Tm, V = logits_in.shape
         loss = ce(logits_in.reshape(B * Tm, V), targets.reshape(B * Tm))
@@ -428,9 +392,6 @@ def eval_epoch(model, loader, device, pad_idx=0, epoch_idx=1, total_epochs=1):
     return total_loss / max(1, n_samples)
 
 
-# ---------------------------
-# Main
-# ---------------------------
 
 def main():
     import argparse
@@ -473,18 +434,16 @@ def main():
     vocab_size = len(tok2idx)
     pad_idx = tok2idx.get("<pad>", 0)
 
-    # If random: choose a decoder/token embedding dimension
     if emb_dim is None:
-        emb_dim = 256  # random embedding dimension
+        emb_dim = 256  
 
-    # config dictionary passed into model
     cfg = {
         "image_size": args.image_size,
         "patch_size": args.patch_size,
         "vit_embed_dim": args.vit_embed_dim,
         "vit_depth": args.vit_depth,
         "vit_num_heads": args.vit_heads,
-        "decoder_embed_dim": emb_dim,            # = token embedding dim
+        "decoder_embed_dim": emb_dim,          
         "decoder_depth": args.dec_depth,
         "decoder_num_heads": args.dec_heads,
         "max_seq_len": args.max_seq_len,

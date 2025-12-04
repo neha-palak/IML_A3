@@ -1,3 +1,5 @@
+
+
 import os
 import os.path as osp
 import argparse
@@ -11,11 +13,14 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 try:
     from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+    from nltk.translate.meteor_score import meteor_score
     NLTK_AVAILABLE = True
 except Exception:
     NLTK_AVAILABLE = False
+
 
 def sinusoidal_positional_encoding(n_pos: int, d_model: int) -> torch.Tensor:
     pe = torch.zeros(n_pos, d_model)
@@ -25,6 +30,7 @@ def sinusoidal_positional_encoding(n_pos: int, d_model: int) -> torch.Tensor:
     pe[:, 0::2] = torch.sin(position * div_term)
     pe[:, 1::2] = torch.cos(position * div_term)
     return pe
+
 
 class PatchEmbed(nn.Module):
     def __init__(self, img_size=128, patch_size=32, in_chans=3, embed_dim=256):
@@ -37,9 +43,12 @@ class PatchEmbed(nn.Module):
                               kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
-        x = self.proj(x) #(B, E, H', W')
+        # (B, E, H', W')
+        x = self.proj(x)  
         B, E, Hn, Wn = x.shape
-        return x.flatten(2).transpose(1, 2) #(B, N, E)
+        # (B, N, E)
+        return x.flatten(2).transpose(1, 2)  
+
 
 class VisionTransformerEncoder(nn.Module):
     def __init__(self, img_size=128, patch_size=32,
@@ -63,18 +72,23 @@ class VisionTransformerEncoder(nn.Module):
 
     def forward(self, x):
         B = x.shape[0]
-        x = self.patch_embed(x) #(B, N, D)
+        # (B, N, D)
+        x = self.patch_embed(x)            
         cls = self.cls_token.expand(B, -1, -1)
-        x = torch.cat([cls, x], dim=1) #(B, N+1, D)
+        # (B, N+1, D)
+        x = torch.cat([cls, x], dim=1)     
 
         pos = self.pos_embed.unsqueeze(0).to(x.device)
         if pos.size(1) != x.size(1):
             pos = pos[:, :x.size(1), :]
         x = x + pos
-        x = x.transpose(0, 1) #(S, B, D)
+         # (S, B, D)
+        x = x.transpose(0, 1)          
         x = self.encoder(x)
-        x = self.norm(x.transpose(0, 1))#(B, S, D)
+        # (B, S, D)
+        x = self.norm(x.transpose(0, 1))  
         return x
+
 
 class DecoderLayerCustom(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward=1024, dropout=0.1):
@@ -106,6 +120,7 @@ class DecoderLayerCustom(nn.Module):
         tgt = self.norm3(tgt + self.dropout(ff))
         return tgt
 
+
 class TransformerDecoderCustom(nn.Module):
     def __init__(self, layer: DecoderLayerCustom, num_layers: int):
         super().__init__()
@@ -126,6 +141,7 @@ class TransformerDecoderCustom(nn.Module):
 
 
 class VisionLanguageTransformer(nn.Module):
+    
     def __init__(self, cfg: Dict[str, Any]):
         super().__init__()
         self.cfg = cfg
@@ -171,28 +187,33 @@ class VisionLanguageTransformer(nn.Module):
         self.pad_idx = cfg.get("pad_idx", 0)
 
     def forward(self, images, token_ids, emo_ids):
+        """
+        images: (B, 3, H, W)
+        token_ids: (B, T)
+        emo_ids: (B,)
+        """
         device = images.device
         B, T = token_ids.shape
 
-        enc = self.encoder(images)        #(B, S, D_enc)
-        enc = self.enc_to_dec(enc)        #(B, S, D_dec)
-        memory = enc.transpose(0, 1)      #(S, B, D_dec)
+        enc = self.encoder(images)       
+        enc = self.enc_to_dec(enc)       
+        memory = enc.transpose(0, 1)      
 
-        tok_emb = self.token_embed(token_ids)          #(B, T, D_dec)
-        emo_vec = self.emotion_emb(emo_ids).unsqueeze(1)  #(B, 1, D_dec)
-        dec_in = torch.cat([emo_vec, tok_emb], dim=1)      #(B, T+1, D)
+        tok_emb = self.token_embed(token_ids)          
+        emo_vec = self.emotion_emb(emo_ids).unsqueeze(1)  
+        dec_in = torch.cat([emo_vec, tok_emb], dim=1)     
 
         pos = self.pos_embed_tokens[: T + 1].unsqueeze(0).to(device)
-        dec_in = dec_in + pos                             #(B, T+1, D)
-        dec_in = dec_in.transpose(0, 1)                   #(T+1, B, D)
+        dec_in = dec_in + pos                          
+        dec_in = dec_in.transpose(0, 1)                  
 
         tgt_mask = torch.triu(
             torch.ones(T + 1, T + 1, device=device), diagonal=1
         ).bool()
         dec_out = self.decoder(dec_in, memory, tgt_mask=tgt_mask)
-        dec_out = dec_out.transpose(0, 1)                 #(B, T+1, D)
-        logits = self.output_proj(dec_out)                #(B, T+1, V)
-        return logits[:, 1:, :]                           #(B, T, V)
+        dec_out = dec_out.transpose(0, 1)               
+        logits = self.output_proj(dec_out)             
+        return logits[:, 1:, :]                         
 
     def greedy_decode(
         self,
@@ -220,9 +241,9 @@ class VisionLanguageTransformer(nn.Module):
             for step in range(max_len):
                 cur_padded = F.pad(cur, (0, max_len - cur.size(1)),
                                    value=self.pad_idx)
-                logits = self.forward(image, cur_padded, emo)  #(1, T, V)
+                logits = self.forward(image, cur_padded, emo)  # (1, T, V)
                 step_idx = cur.size(1) - 1
-                logit_step = logits[:, step_idx, :]            #(1, V)
+                logit_step = logits[:, step_idx, :]            # (1, V)
                 next_id = torch.argmax(logit_step, dim=-1).item()
                 generated.append(next_id)
                 if next_id == eos_idx:
@@ -232,6 +253,8 @@ class VisionLanguageTransformer(nn.Module):
                 )
 
         return generated
+
+
 
 def load_vocab(vocab_path: str):
     import pickle
@@ -297,6 +320,8 @@ def simple_rouge_l(hyp: List[str], ref: List[str]) -> Tuple[float, float, float]
     f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
     return prec, rec, f1
 
+
+
 def evaluate_for_embedding(
     emb_type: str,
     args,
@@ -313,7 +338,7 @@ def evaluate_for_embedding(
         print(f"[{emb_type}] Best checkpoint not found at {ckpt_path}, skipping.")
         return {}
 
-    print(f"\n Evaluating embedding type: {emb_type} ")
+    print(f"\nEvaluating embedding type: {emb_type}")
     print("Loading checkpoint:", ckpt_path)
     ck = torch.load(str(ckpt_path), map_location=device)
 
@@ -324,16 +349,16 @@ def evaluate_for_embedding(
         print("No config in checkpoint; reconstructing from state_dict shapes.")
         sd = ck["model_state_dict"]
 
-        #token embedding dim (300 for glove/fasttext)
+        # token embedding dim 
         dec_dim = sd["token_embed.weight"].shape[1]
 
-        #encoder embed dim
+        # encoder embed dim (should match decoder for training)
         enc_dim = sd["encoder.patch_embed.proj.weight"].shape[0]
 
-        #num emotions
+        # num emotions
         num_emotions = sd["emotion_emb.weight"].shape[0]
 
-        #max_seq_len+1 from positional embedding
+        # max_seq_len+1 from positional embedding
         max_pos = sd["pos_embed_tokens"].shape[0]
         max_seq_len = max_pos - 1
 
@@ -353,6 +378,7 @@ def evaluate_for_embedding(
 
     cfg["vocab_size"] = len(tok2idx)
     cfg["pad_idx"] = pad_idx
+
     model = VisionLanguageTransformer(cfg)
     model.load_state_dict(ck["model_state_dict"], strict=True)
     model.to(device)
@@ -366,6 +392,11 @@ def evaluate_for_embedding(
     hypotheses: List[List[str]] = []
     meteor_refs: List[str] = []
     meteor_hyps: List[str] = []
+
+    if NLTK_AVAILABLE:
+        smoothie = SmoothingFunction().method4
+    else:
+        smoothie = None
 
     for _, row in df.iterrows():
         painting = row["painting"]
@@ -381,13 +412,12 @@ def evaluate_for_embedding(
         else:
             img = torch.tensor(arr).float()
 
-        #reference tokens
+        # reference tokens
         if isinstance(row.get("tokens_str", None), str):
             ref_tokens = row["tokens_str"].split()
         else:
             ref_tokens = str(row["utter_clean"]).split()
 
-        #generate
         gen_ids = model.greedy_decode(
             image=img,
             emo_id=emo,
@@ -403,9 +433,13 @@ def evaluate_for_embedding(
         references.append(ref_tokens)
         hypotheses.append(hyp_tokens)
 
+        if NLTK_AVAILABLE:
+            meteor_refs.append(" ".join(ref_tokens))
+            meteor_hyps.append(" ".join(hyp_tokens))
+
     print(f"[{emb_type}] Collected {len(hypotheses)} hypothesis–reference pairs.")
 
-    #BLEU
+    # BLEU
     if references and hypotheses:
         bleu1 = corpus_bleu(
             [[r] for r in references], hypotheses,
@@ -420,7 +454,7 @@ def evaluate_for_embedding(
     else:
         bleu1 = bleu4 = 0.0
 
-    #ROUGE-1 / ROUGE-L
+    # ROUGE-1 / ROUGE-L
     rouge1_f_list, rougeL_f_list = [], []
     for hyp, ref in zip(hypotheses, references):
         _, _, f1_1 = simple_rouge_1(hyp, ref)
@@ -431,7 +465,16 @@ def evaluate_for_embedding(
     rouge1_f = float(np.mean(rouge1_f_list)) if rouge1_f_list else 0.0
     rougeL_f = float(np.mean(rougeL_f_list)) if rougeL_f_list else 0.0
 
-    #qualitative examples
+    # METEOR
+    # meteor_avg = None
+    # if NLTK_AVAILABLE and meteor_refs:
+    #     try:
+    #         scores = [meteor_score([r], h) for r, h in zip(meteor_refs, meteor_hyps)]
+    #         meteor_avg = float(np.mean(scores))
+    #     except Exception:
+    #         meteor_avg = None
+
+    # qualitative examples
     print(f"\n[{emb_type}] Sample qualitative generations:")
     num_show = min(args.num_examples, len(hypotheses))
     for i in range(num_show):
@@ -447,16 +490,19 @@ def evaluate_for_embedding(
         "bleu4": float(bleu4),
         "rouge1_f": rouge1_f,
         "rougeL_f": rougeL_f,
+        # "meteor": meteor_avg,
         "num_pairs": len(hypotheses),
     }
     print(f"\n[{emb_type}] metrics:")
     print(json.dumps(results, indent=2))
     return results
 
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Evaluate VLT (Model 2) for multiple embedding types.")
     p.add_argument("--checkpoints-root", type=str, default="new_checkpoints",
-                   help="Root folder with subdirs tfidf/, glove/, fasttext/")
+                   help="Root folder with subdirs glove/, fasttext/, /tfidf")
     p.add_argument("--embedding-types", type=str, nargs="+",
                    default=["glove", "fasttext", "tfidf"])
     p.add_argument("--csv", type=str, default="new_preprocessed/artemis_preprocessed.csv")
@@ -478,7 +524,7 @@ def parse_args():
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--num_emotions", type=int, default=9)
 
-    p.add_argument("--out-json", type=str, default="eval_outputs/m2_eval_summary.json")
+    p.add_argument("--out-json", type=str, default="new_checkpoints/m2_eval_summary.json")
     return p.parse_args()
 
 

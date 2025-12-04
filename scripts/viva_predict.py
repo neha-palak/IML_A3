@@ -12,10 +12,16 @@ import matplotlib.pyplot as plt
 from M2_transformers import VisionLanguageTransformerEmotion
 from M1_CNN import CustomCNNEncoder, EmotionLSTMDecoder
 
+
 DEFAULT_IMAGES_ROOT = "viva_images"
+
+# VLT checkpoints
 CKPT_VLT_GLOVE    = "new_checkpoints/glove/m2_glove_best.pt"
 CKPT_VLT_FASTTEXT = "new_checkpoints/fasttext/m2_fasttext_best.pt"
-CKPT_CNN_ROOT = "eval_outputs/results_cnn_lstm"  # best_model_glove/fasttext/tfidf.pth
+CKPT_VLT_TFIDF = "new_checkpoints/tfidf/m2_tfidf_best.pt"
+
+# CNN+LSTM checkpoints 
+CKPT_CNN_ROOT = "eval_outputs/results_cnn_lstm" 
 
 EMO_ID2NAME = {
     0: "amusement", 1: "contentment", 2: "awe", 3: "excitement",
@@ -25,11 +31,14 @@ EMO_ID2NAME = {
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DEFAULT_PREPROC_SIZE = 128
 
+# GLOBAL CACHES (for notebook usage)
 _CACHED_VLT_MODELS: Dict[str, VisionLanguageTransformerEmotion] = {}
 _CACHED_VLT_VOCABS: Dict[str, Dict[str, Dict]] = {}
 
 _CACHED_CNN_MODELS: Dict[str, Dict[str, Any]] = {}  
-_CACHED_CNN_VOCABS: Dict[str, Dict[str, Dict]] = {} 
+_CACHED_CNN_VOCABS: Dict[str, Dict[str, Dict]] = {}  
+
+
 
 def ensure_jpg_path(root: Path, name: str) -> Path:
     p = root / name
@@ -39,6 +48,7 @@ def ensure_jpg_path(root: Path, name: str) -> Path:
 
 
 def load_and_preprocess_jpg(images_root: str, image_name: str, size: int):
+
     root = Path(images_root)
     jpg_path = ensure_jpg_path(root, image_name)
     if not jpg_path.exists():
@@ -81,6 +91,8 @@ def tokens_to_caption(token_ids, idx2tok, eos_idx, pad_idx) -> str:
             continue
         words.append(w)
     return " ".join(words)
+
+
 
 def load_vlt_from_ckpt(ckpt_path: str):
     ck = torch.load(ckpt_path, map_location=DEVICE)
@@ -147,7 +159,9 @@ def greedy_vlt(
     ids = cur.squeeze(0).tolist()
     return tokens_to_caption(ids, idx2tok, eos_idx, pad_idx)
 
+
 def load_cnn_from_ckpt(emb_type: str):
+    
     ckpt_path = Path(CKPT_CNN_ROOT) / f"best_model_{emb_type}.pth"
     ck = torch.load(ckpt_path, map_location=DEVICE)
 
@@ -166,7 +180,7 @@ def load_cnn_from_ckpt(emb_type: str):
         num_emotions=cfg["NUM_EMOTIONS"],
         image_feature_dim=cfg["IMAGE_FEATURE_DIM"],
         dropout_rate=cfg["DROPOUT_RATE"],
-        embedding_matrix=None,  # weights from state dict
+        embedding_matrix=None, 
     ).to(DEVICE)
 
     encoder.load_state_dict(ck["encoder_state_dict"])
@@ -193,7 +207,7 @@ def greedy_cnn(
     tok2idx: Dict[str, int],
     max_len: int = 25,
 ) -> str:
-    
+   
     idx2tok = {i: t for t, i in tok2idx.items()}
 
     pad_idx = tok2idx.get("<pad>", 0)
@@ -209,8 +223,7 @@ def greedy_cnn(
     result_ids: List[int] = []
 
     with torch.no_grad():
-        # encode image + init hidden
-        img_feat = encoder(img)               # (1, D_img)
+        img_feat = encoder(img)             
         h, c = decoder.init_hidden_state(img_feat, emo)
 
         cur = torch.tensor([[sos_idx]], dtype=torch.long, device=DEVICE)
@@ -220,14 +233,15 @@ def greedy_cnn(
             emb = decoder.word_embeddings(cur[:, -1:])
             emb = decoder.dropout_word(emb)
 
-            out, (h, c) = decoder.lstm(emb, (h, c))        # (1,1,H)
-            logits = decoder.output_layer(out[:, -1, :])   # (1,V)
+            out, (h, c) = decoder.lstm(emb, (h, c))        
+            logits = decoder.output_layer(out[:, -1, :])   
             next_id = int(torch.argmax(logits, dim=-1).item())
 
             if next_id in (eos_idx, pad_idx):
                 break
 
             word = idx2tok.get(next_id, "")
+
             if len(result_ids) == 0 and word in EMOTION_WORDS:
                 cur = torch.cat(
                     [cur, torch.tensor([[next_id]], device=DEVICE)],
@@ -245,19 +259,22 @@ def greedy_cnn(
     # Convert ids -> tokens
     tokens = [idx2tok.get(i, "<unk>") for i in result_ids]
     caption = " ".join(tokens)
+
+    # strip asterisks and tidy whitespace
     caption = caption.replace("*", "").strip()
 
     return caption
 
-def predict_single_image(image_name: str, emotion_id: int, images_root: str = DEFAULT_IMAGES_ROOT):
-    # Called from Jupyter Notebook.
 
+#  Interactive Notebook Function
+def predict_single_image(image_name: str, emotion_id: int, images_root: str = DEFAULT_IMAGES_ROOT):
+    
     global _CACHED_VLT_MODELS, _CACHED_VLT_VOCABS
     global _CACHED_CNN_MODELS, _CACHED_CNN_VOCABS
 
     if not _CACHED_VLT_MODELS:
         print("[INFO] Loading VLT models into cache (first run only)...")
-        ckpt_map = {"glove": CKPT_VLT_GLOVE, "fasttext": CKPT_VLT_FASTTEXT}
+        ckpt_map = {"glove": CKPT_VLT_GLOVE, "fasttext": CKPT_VLT_FASTTEXT, "tfidf": CKPT_VLT_TFIDF}
         for name, path in ckpt_map.items():
             p = Path(path)
             if p.exists():
@@ -335,12 +352,13 @@ def predict_single_image(image_name: str, emotion_id: int, images_root: str = DE
         cap = greedy_cnn(
             encoder=enc,
             decoder=dec,
-            img=img_tensor.squeeze(0),  # can be 3D
+            img=img_tensor.squeeze(0),  
             emo_id=emotion_id,
             tok2idx=vocab["tok2idx"],
         )
         print(f"[CNN-{name}]   {cap}")
     print("-" * 60)
+
 
 def main():
     import argparse
