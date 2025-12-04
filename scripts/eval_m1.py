@@ -34,7 +34,7 @@ import torch.nn.functional as F
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
 # -------- import from new_m1.py --------
-from new_m1 import (
+from scripts.M1_CNN import (
     CustomCNNEncoder,
     EmotionLSTMDecoder,
     ArtemisCaptioningDataset,

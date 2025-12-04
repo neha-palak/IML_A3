@@ -1,0 +1,14 @@
+[
+  {
+    "input": "arkhip-kuindzhi_birches-1879",
+    "emotion_id": 1,
+    "emotion_name": "contentment",
+    "generations": {
+      "vlt_glove": "the bright colors of the trees make me feel calm",
+      "vlt_fasttext": "the colors are bright and the colors are soothing",
+      "cnn_glove": "the colors are very calming and the colors are very calming",
+      "cnn_fasttext": "the colors are very calming and the colors are calming",
+      "cnn_tfidf": "the colors are very peaceful and the colors are very calming"
+    }
+  }
+]
