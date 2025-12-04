@@ -6,23 +6,12 @@ Vision-Language Transformer (Model 2) with:
 - Custom ViT-like image encoder
 - Transformer decoder for text
 - Emotion conditioning via separate embedding
-- Pluggable text embedding types: random | glove | fasttext | tfidf
+- Pluggable text embedding types: glove | fasttext | tfidf
 
 Data assumptions (from preprocessing.py):
 - CSV: new_preprocessed/artemis_preprocessed.csv
   columns: painting, token_ids_str, emotion_label, split, ...
 - Image features: new_preprocessed/features/<painting>.npy  (H,W,3 in [0,1])
-
-Run example:
-
-python3 scripts/model2_vlt_embed.py \
-  --csv new_preprocessed/artemis_preprocessed.csv \
-  --features-root new_preprocessed/features \
-  --vocab new_preprocessed/vocab.pkl \
-  --repr-dir new_preprocessed \
-  --embedding-type glove \
-  --device cpu \
-  --num-epochs 20
 """
 
 import os
@@ -46,8 +35,9 @@ try:
     # when used as a package (e.g. from scripts.viva_predict import ...)
     from scripts.embedding_utils import get_embedding_matrix
 except ImportError:
-    # when running from inside scripts/ directly: python3 scripts/transformers.py
+    # when running from inside scripts/ directly: python3 scripts/model2_vlt_embed.py
     from embedding_utils import get_embedding_matrix
+
 
 # ---------------------------
 # Dataset
@@ -372,16 +362,18 @@ class VisionLanguageTransformerEmotion(nn.Module):
 
 
 # ---------------------------
-# Training helpers
+# Training helpers (with tqdm progress)
 # ---------------------------
 
-def train_one_epoch(model, loader, optimizer, device, pad_idx=0):
+def train_one_epoch(model, loader, optimizer, device, pad_idx=0, epoch_idx=1, total_epochs=1):
     model.train()
     ce = nn.CrossEntropyLoss(ignore_index=pad_idx)
     total_loss = 0.0
     n_samples = 0
 
-    for imgs, token_ids, emos in loader:
+    loop = tqdm(loader, desc=f"Train epoch {epoch_idx}/{total_epochs}", leave=False)
+
+    for imgs, token_ids, emos in loop:
         imgs = imgs.to(device)
         token_ids = token_ids.to(device)
         emos = emos.to(device)
@@ -402,17 +394,21 @@ def train_one_epoch(model, loader, optimizer, device, pad_idx=0):
         total_loss += loss.item() * B
         n_samples += B
 
+        avg_loss = total_loss / max(1, n_samples)
+        loop.set_postfix(loss=f"{avg_loss:.4f}")
+
     return total_loss / max(1, n_samples)
 
 
-def eval_epoch(model, loader, device, pad_idx=0):
+def eval_epoch(model, loader, device, pad_idx=0, epoch_idx=1, total_epochs=1):
     model.eval()
     ce = nn.CrossEntropyLoss(ignore_index=pad_idx)
     total_loss = 0.0
     n_samples = 0
 
     with torch.no_grad():
-        for imgs, token_ids, emos in loader:
+        loop = tqdm(loader, desc=f"Val   epoch {epoch_idx}/{total_epochs}", leave=False)
+        for imgs, token_ids, emos in loop:
             imgs = imgs.to(device)
             token_ids = token_ids.to(device)
             emos = emos.to(device)
@@ -425,6 +421,9 @@ def eval_epoch(model, loader, device, pad_idx=0):
             loss = ce(logits_in.reshape(B * Tm, V), targets.reshape(B * Tm))
             total_loss += loss.item() * B
             n_samples += B
+
+            avg_loss = total_loss / max(1, n_samples)
+            loop.set_postfix(loss=f"{avg_loss:.4f}")
 
     return total_loss / max(1, n_samples)
 
@@ -443,7 +442,7 @@ def main():
     parser.add_argument("--repr-dir", type=str, default="new_preprocessed")
     parser.add_argument("--embedding-type", type=str,
                         default="tfidf",
-                        choices=[ "glove", "fasttext", "tfidf"])
+                        choices=["glove", "fasttext", "tfidf"])
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -531,8 +530,14 @@ def main():
     for epoch in range(1, args.num_epochs + 1):
         t_start = datetime.datetime.now().isoformat()
 
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, pad_idx)
-        val_loss = eval_epoch(model, val_loader, device, pad_idx)
+        train_loss = train_one_epoch(
+            model, train_loader, optimizer, device,
+            pad_idx=pad_idx, epoch_idx=epoch, total_epochs=args.num_epochs
+        )
+        val_loss = eval_epoch(
+            model, val_loader, device,
+            pad_idx=pad_idx, epoch_idx=epoch, total_epochs=args.num_epochs
+        )
 
         print(f"Epoch {epoch}/{args.num_epochs}: train={train_loss:.4f}, val={val_loss:.4f}")
 

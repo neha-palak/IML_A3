@@ -11,6 +11,11 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+try:
+    from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+    NLTK_AVAILABLE = True
+except Exception:
+    NLTK_AVAILABLE = False
 
 def sinusoidal_positional_encoding(n_pos: int, d_model: int) -> torch.Tensor:
     pe = torch.zeros(n_pos, d_model)

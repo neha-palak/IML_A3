@@ -12,3 +12,5 @@ new_checkpoints/
 
 __pycache__
 
+*.pyc
+__pycache__/
