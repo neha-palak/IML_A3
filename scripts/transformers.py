@@ -22,7 +22,7 @@ python3 scripts/model2_vlt_embed.py \
   --repr-dir new_preprocessed \
   --embedding-type glove \
   --device cpu \
-  --num-epochs 3
+  --num-epochs 20
 """
 
 import os
@@ -41,8 +41,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-from embedding_utils import get_embedding_matrix
-
+# inside scripts/transformers.py, near the top
+try:
+    # when used as a package (e.g. from scripts.viva_predict import ...)
+    from scripts.embedding_utils import get_embedding_matrix
+except ImportError:
+    # when running from inside scripts/ directly: python3 scripts/transformers.py
+    from embedding_utils import get_embedding_matrix
 
 # ---------------------------
 # Dataset
@@ -97,7 +102,7 @@ class CaptionDatasetVLT(Dataset):
         path = self.features_root / f"{painting}.npy"
         if not path.exists():
             # fallback if feature missing
-            return torch.zeros(3, 224, 224).float()
+            return torch.zeros(3, 128, 128).float()
         arr = np.load(path)
         if arr.ndim == 3:
             # H,W,3 in [0,1]
@@ -135,7 +140,7 @@ class PatchEmbed(nn.Module):
     Simple patch embedding: conv with stride=patch_size.
     """
 
-    def __init__(self, img_size=224, patch_size=32, in_chans=3, embed_dim=256):
+    def __init__(self, img_size=128, patch_size=32, in_chans=3, embed_dim=256):
         super().__init__()
         assert img_size % patch_size == 0, "img_size must be divisible by patch_size"
         self.img_size = img_size
@@ -159,7 +164,7 @@ class VisionTransformerEncoder(nn.Module):
     ViT-like encoder: patch embedding + TransformerEncoder + CLS token.
     """
 
-    def __init__(self, img_size=224, patch_size=32,
+    def __init__(self, img_size=128, patch_size=32,
                  embed_dim=256, depth=2, num_heads=4, dropout=0.1):
         super().__init__()
         self.patch_embed = PatchEmbed(img_size, patch_size, 3, embed_dim)
@@ -438,15 +443,15 @@ def main():
     parser.add_argument("--repr-dir", type=str, default="new_preprocessed")
     parser.add_argument("--embedding-type", type=str,
                         default="glove",
-                        choices=["random", "glove", "fasttext", "tfidf"])
+                        choices=[ "glove", "fasttext", "tfidf"])
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--num-epochs", type=int, default=3)
+    parser.add_argument("--num-epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--checkpoint-root", type=str, default="new_checkpoints")
     parser.add_argument("--max-seq-len", type=int, default=25)
     parser.add_argument("--num-emotions", type=int, default=9)
-    parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument("--image-size", type=int, default=128)
     parser.add_argument("--patch-size", type=int, default=32)
     parser.add_argument("--vit-embed-dim", type=int, default=256)
     parser.add_argument("--vit-depth", type=int, default=2)

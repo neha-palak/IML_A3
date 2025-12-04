@@ -58,7 +58,7 @@ def sinusoidal_positional_encoding(n_pos: int, d_model: int) -> torch.Tensor:
 
 
 class PatchEmbed(nn.Module):
-    def __init__(self, img_size=224, patch_size=32, in_chans=3, embed_dim=256):
+    def __init__(self, img_size=128, patch_size=32, in_chans=3, embed_dim=256):
         super().__init__()
         assert img_size % patch_size == 0
         self.img_size = img_size
@@ -74,7 +74,7 @@ class PatchEmbed(nn.Module):
 
 
 class VisionTransformerEncoder(nn.Module):
-    def __init__(self, img_size=224, patch_size=32,
+    def __init__(self, img_size=128, patch_size=32,
                  embed_dim=256, depth=2, num_heads=4, dropout=0.1):
         super().__init__()
         self.patch_embed = PatchEmbed(img_size, patch_size, 3, embed_dim)
@@ -175,7 +175,7 @@ class VisionLanguageTransformer(nn.Module):
         dropout = cfg.get("dropout", 0.1)
 
         self.encoder = VisionTransformerEncoder(
-            img_size=cfg.get("image_size", 224),
+            img_size=cfg.get("image_size", 128),
             patch_size=cfg.get("patch_size", 32),
             embed_dim=D_enc,
             depth=cfg.get("vit_depth", 2),
@@ -534,7 +534,7 @@ def parse_args():
     p.add_argument("--checkpoints-root", type=str, default="new_checkpoints",
                    help="Root folder with subdirs random/, glove/, fasttext/")
     p.add_argument("--embedding-types", type=str, nargs="+",
-                   default=["random", "glove", "fasttext"])
+                   default=["glove", "fasttext"])
     p.add_argument("--csv", type=str, default="new_preprocessed/artemis_preprocessed.csv")
     p.add_argument("--features-root", type=str, default="new_preprocessed/features")
     p.add_argument("--vocab", type=str, default="new_preprocessed/vocab.pkl")
@@ -544,7 +544,7 @@ def parse_args():
     p.add_argument("--num_examples", type=int, default=5)
 
     # Fallback config params (only used if not in checkpoint)
-    p.add_argument("--image_size", type=int, default=224)
+    p.add_argument("--image_size", type=int, default=128)
     p.add_argument("--patch_size", type=int, default=32)
     p.add_argument("--vit_embed_dim", type=int, default=256)
     p.add_argument("--vit_depth", type=int, default=2)

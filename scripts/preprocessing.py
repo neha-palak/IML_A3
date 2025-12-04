@@ -318,7 +318,7 @@ def parse_args():
     p.add_argument("--image-size", type=int, default=128)
     p.add_argument("--max-len", type=int, default=25, help="max tokens (including <start>/<end>)")
     p.add_argument("--min-len", type=int, default=3, help="min token length (after tokenization)")
-    p.add_argument("--max-vocab-size", type=int, default=8000)
+    p.add_argument("--max-vocab-size", type=int, default=9900)
     p.add_argument("--split-loads", type=float, nargs=3, default=(0.8,0.1,0.1))
     p.add_argument("--dedup", action="store_true")
     return p.parse_args()
