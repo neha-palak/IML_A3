@@ -30,57 +30,68 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from embedding_utils import get_embedding_matrix  # <<< use your util here
+import pandas as pd
+import numpy as np
+import os.path as osp
+import os
+import ast
+import json
+import pickle
+from tqdm import tqdm
 
-# --- CONFIGURATION ---
-CONFIG = {
-    "EMBEDDING_TYPE": "tfidf",              # 'glove', 'fasttext', 'tfidf'
+# Import necessary functions from the utility file
+# NOTE: This assumes embedding_utils.py is in the same directory or accessible via PYTHONPATH.
+from embedding_utils import get_embedding_matrix, load_vocab 
+
+# --- CONFIGURATION (Defaulted to a safe value) ---
+GLOBAL_CONFIG = {
+    "EMBEDDING_TYPE": "glove",           # This will be overridden in the loop
     "PREPROCESSED_CSV": "new_preprocessed/artemis_preprocessed.csv",
     "VOCAB_PATH": "new_preprocessed/vocab.pkl",
     "IMAGE_FEAT_DIR": "new_preprocessed/features",
     "RESULTS_DIR": "eval_outputs/results_cnn_lstm",
-
-    "IMAGE_SIZE": 128,                      # used by encoder conv assumptions
-    "IMAGE_FEATURE_DIM": 256,               # encoder output dim
-    "HIDDEN_SIZE": 256,
+    "IMAGE_SIZE": 128,                   # Input image size (H=W)
+    "IMAGE_FEATURE_DIM": 256,            # Output dimension of CNN Encoder
+    "EMOTION_DIM": 300,                  # Used for Embedding size if no pre-trained matrix loads
+    "HIDDEN_SIZE": 256,                  # LSTM hidden size
     "DROPOUT_RATE": 0.2,
     "NUM_EMOTIONS": 9,
-    "MAX_LEN": 25,
+    "MAX_LEN": 25,                       # Max sequence length (including <start>/<end>)
     "BATCH_SIZE": 32,
-    "NUM_EPOCHS": 3,                        # increase (e.g., 15–20) for real training
+    "NUM_EPOCHS": 5,
     "LEARNING_RATE": 1e-4,
     "SEED": 42,
 }
 
-torch.manual_seed(CONFIG["SEED"])
-np.random.seed(CONFIG["SEED"])
+torch.manual_seed(GLOBAL_CONFIG["SEED"])
+np.random.seed(GLOBAL_CONFIG["SEED"])
+
+# --- CONSTANTS DERIVED FROM VOCAB ---
+PAD_TOKEN_ID = 0
+START_TOKEN_ID = 1
+END_TOKEN_ID = 2
+UNK_TOKEN_ID = 3
+VOCAB_SIZE = 0
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-HISTORY_LOG_PATH = osp.join(CONFIG["RESULTS_DIR"], "full_experiment_history.json")
+HISTORY_LOG_PATH = osp.join(GLOBAL_CONFIG["RESULTS_DIR"], "full_experiment_history.json")
 
 
 # ----------------------------------------------------
-# 1. DATASET
+# 1. DATASET AND DATALOADER 
 # ----------------------------------------------------
 
 class ArtemisCaptioningDataset(Dataset):
-    """
-    Uses:
-      - painting (for .npy image array)
-      - emotion_label (0..8)
-      - token_ids_with_emotion_str: a list-string like "[1, 333, 5, ...]"
-        where the emotion token is already prepended in preprocessing.
-    """
-
-    def __init__(self, csv_path, split, feature_dir):
+    def __init__(self, csv_path, split, feature_dir, vocab_path):
         self.df = pd.read_csv(csv_path)
         self.df = self.df[self.df['split'] == split].reset_index(drop=True)
         self.feature_dir = feature_dir
 
         self.painting_ids = self.df['painting'].tolist()
         self.emotion_labels = self.df['emotion_label'].tolist()
-        self.token_id_strs = self.df['token_ids_with_emotion_str'].tolist()
+        # NOTE: Assumes the preprocessed CSV has the column 'token_ids' 
+        self.token_id_strs = self.df['token_ids'].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x).tolist()
+
 
     def __len__(self):
         return len(self.df)
@@ -88,71 +99,68 @@ class ArtemisCaptioningDataset(Dataset):
     def __getitem__(self, idx):
         painting_id = self.painting_ids[idx]
         img_feat_path = osp.join(self.feature_dir, f"{painting_id}.npy")
+        
+        # Load image data (assumed to be a normalized 3D array HxWx3)
+        try:
+            image_data = torch.from_numpy(np.load(img_feat_path)).float() 
+        except FileNotFoundError:
+            print(f"Warning: Image feature file not found for {painting_id}")
+            # Use a zero tensor as a placeholder for missing images
+            image_data = torch.zeros((GLOBAL_CONFIG["IMAGE_SIZE"], GLOBAL_CONFIG["IMAGE_SIZE"], 3), dtype=torch.float)
 
-        arr = np.load(img_feat_path)        # (H,W,3) in [0,1]
-        image_data = torch.from_numpy(arr).float()  # (H,W,3)
-
-        token_ids_list = ast.literal_eval(self.token_id_strs[idx])
+        token_ids_list = self.token_id_strs[idx]
         token_ids = torch.tensor(token_ids_list, dtype=torch.long)
 
         emotion_label = torch.tensor(self.emotion_labels[idx], dtype=torch.long)
 
-        # teacher forcing: input is everything except last; target is everything except first
-        caption_input = token_ids[:-1]
-        caption_target = token_ids[1:]
+        # Input sequence (tokens 0 to L-1, i.e., from <start> up to the token before <end>)
+        caption_input = token_ids[:-1] 
+        # Target sequence (tokens 1 to L, i.e., from the first word up to <end>)
+        caption_target = token_ids[1:] 
 
         return image_data, emotion_label, caption_input, caption_target, painting_id
 
-
 # ----------------------------------------------------
-# 2. CNN ENCODER
+# 2. CUSTOM CNN ENCODER 
 # ----------------------------------------------------
 
 class CustomCNNEncoder(nn.Module):
-    """
-    Simple CNN that takes an RGB image (B,H,W,3) or (B,3,H,W) and outputs a vector
-    of dimension IMAGE_FEATURE_DIM.
-    """
-
-    def __init__(self, output_dim):
+    def __init__(self, output_dim, input_size=GLOBAL_CONFIG["IMAGE_SIZE"]):
         super().__init__()
-
-        self.cnn_blocks = nn.Sequential(
-            # assume input ~ 128x128; if 224x224, still works (will end up 14x14)
-            nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1), nn.ReLU(),  # 128 -> 64
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1), nn.ReLU(),  # 64 -> 32
-            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1), nn.ReLU(),  # 32 -> 16
-            nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1), nn.ReLU(),  # 16 -> 8
-        )
-
-        final_spatial_dim = 8   # if input 128; if 224 it will be different but still consistent
+        
+        # Calculate expected output size for the flattened layer
+        final_spatial_dim = input_size // (2**4) # 128 -> 8
         final_cnn_channels = 512
-        OBSERVED_FLATTENED_SIZE = final_cnn_channels * final_spatial_dim * final_spatial_dim
-
+        OBSERVED_FLATTENED_SIZE = final_cnn_channels * final_spatial_dim * final_spatial_dim 
+        
+        self.cnn_blocks = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1), nn.ReLU(),
+        )
+        
         self.fc = nn.Sequential(
             nn.Flatten(),
             nn.Linear(OBSERVED_FLATTENED_SIZE, 1024),
             nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(1024, output_dim),
+            nn.Dropout(0.5), 
+            nn.Linear(1024, output_dim) 
         )
 
         for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.Linear):
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        # DataLoader batches: (B,H,W,3); convert to (B,3,H,W)
+        # Permute from (B, H, W, 3) to (B, 3, H, W) 
         if x.dim() == 4 and x.shape[-1] == 3:
-            x = x.permute(0, 3, 1, 2)
+              x = x.permute(0, 3, 1, 2) 
         x = self.cnn_blocks(x)
         x = self.fc(x)
         return x  # (B, output_dim)
-
 
 # ----------------------------------------------------
 # 3. EMOTION-FUSED LSTM DECODER
@@ -180,25 +188,26 @@ class EmotionLSTMDecoder(nn.Module):
                 torch.tensor(embedding_matrix, dtype=torch.float32),
                 freeze=False,
             )
-            embed_dim = embedding_matrix.shape[1]
+            # Use the actual dimension from the loaded matrix
+            embed_dim = embedding_matrix.shape[1] 
         else:
             self.word_embeddings = nn.Embedding(vocab_size, embed_dim)
 
         # 2. Emotion embedding
         self.emotion_embeddings = nn.Embedding(num_emotions, embed_dim)
 
-        # LSTM input = ONLY word embeddings (image/emotion in h0/c0)
-        self.lstm_input_size = embed_dim
+        self.lstm_input_size = embed_dim 
 
-        # 3. Initial state generators from [image_features; emotion_vec]
-        context_dim = image_feature_dim + embed_dim
+        # 2. Initial State Generators (h0 and c0)
+        init_gen_input_dim = image_feature_dim + embed_dim 
+        
         self.h0_generator = nn.Sequential(
-            nn.Linear(context_dim, hidden_size),
+            nn.Linear(init_gen_input_dim, hidden_size), 
             nn.ReLU(),
             nn.Dropout(dropout_rate),
         )
         self.c0_generator = nn.Sequential(
-            nn.Linear(context_dim, hidden_size),
+            nn.Linear(init_gen_input_dim, hidden_size), 
             nn.ReLU(),
             nn.Dropout(dropout_rate),
         )
@@ -208,7 +217,8 @@ class EmotionLSTMDecoder(nn.Module):
             input_size=self.lstm_input_size,
             hidden_size=hidden_size,
             batch_first=True,
-            num_layers=2,  # we keep 1 layer; dropout internal ignored
+            num_layers=2, #1 didnt work the best 
+            dropout=dropout_rate if dropout_rate > 0 else 0.0
         )
 
         # 5. Output layer
@@ -216,16 +226,12 @@ class EmotionLSTMDecoder(nn.Module):
         self.dropout_word = nn.Dropout(dropout_rate)
 
     def init_hidden_state(self, image_features, emotion_labels):
-        """
-        Compute h0, c0 from image_features + emotion embedding.
-        image_features: (B, image_feature_dim)
-        emotion_labels: (B,)
-        """
-        emotion_vec = self.emotion_embeddings(emotion_labels)  # (B, embed_dim)
-        combined = torch.cat([image_features, emotion_vec], dim=1)  # (B, image_feat + embed_dim)
-        h0 = self.h0_generator(combined).unsqueeze(0)  # (1,B,H)
-        c0 = self.c0_generator(combined).unsqueeze(0)  # (1,B,H)
-        return h0, c0
+        """Generates initial h0 and c0 using image features and emotion embedding."""
+        emotion_vec = self.emotion_embeddings(emotion_labels) 
+        combined_context = torch.cat((image_features, emotion_vec), dim=1) 
+        h0 = self.h0_generator(combined_context).unsqueeze(0) 
+        c0 = self.c0_generator(combined_context).unsqueeze(0) 
+        return h0, c0, emotion_vec
 
     def forward(self, image_features, emotion_labels, caption_input):
         """
@@ -237,14 +243,17 @@ class EmotionLSTMDecoder(nn.Module):
 
         word_embeds = self.word_embeddings(caption_input)  # (B,T,E)
         word_embeds = self.dropout_word(word_embeds)
+        
+        fused_input = word_embeds
+        
+        lstm_out, _ = self.lstm(fused_input, (h0, c0)) 
 
-        lstm_out, _ = self.lstm(word_embeds, (h0, c0))  # (B,T,H)
-        logits = self.output_layer(lstm_out)            # (B,T,V)
-        return logits
-
+        output = self.output_layer(lstm_out)
+        
+        return output
 
 # ----------------------------------------------------
-# 4. TRAIN / VAL
+# 4. TRAINING & VALIDATION FUNCTIONS
 # ----------------------------------------------------
 
 def train_one_epoch(encoder, decoder, dataloader, criterion, optimizer, pad_idx):
@@ -263,22 +272,20 @@ def train_one_epoch(encoder, decoder, dataloader, criterion, optimizer, pad_idx)
 
         optimizer.zero_grad()
 
-        image_features = encoder(image_data)  # (B, image_feature_dim)
-        logits = decoder(image_features, emotion_labels, caption_input)  # (B,T,V)
-
+        image_features = encoder(image_data)
+        output = decoder(image_features, emotion_labels, caption_input)
+        
+        # Flatten and calculate loss
         loss = criterion(
             logits.reshape(-1, logits.size(-1)),
             caption_target.reshape(-1),
         )
         loss.backward()
         optimizer.step()
-
-        batch_size = image_data.size(0)
-        total_loss += loss.item() * batch_size
-        total_count += batch_size
-
-    return total_loss / max(1, total_count)
-
+        
+        total_loss += loss.item() * image_data.size(0) 
+        
+    return total_loss / len(dataloader.dataset)
 
 def validate_one_epoch(encoder, decoder, dataloader, criterion, pad_idx):
     encoder.eval()
@@ -311,7 +318,7 @@ def validate_one_epoch(encoder, decoder, dataloader, criterion, pad_idx):
 
 
 # ----------------------------------------------------
-# 5. HISTORY HELPERS
+# 5. HISTORY MANAGEMENT
 # ----------------------------------------------------
 
 def load_full_history():
@@ -326,107 +333,93 @@ def load_full_history():
 
 
 def save_full_history(history):
-    os.makedirs(CONFIG["RESULTS_DIR"], exist_ok=True)
+    """Saves the persistent history log."""
+    os.makedirs(GLOBAL_CONFIG["RESULTS_DIR"], exist_ok=True)
     with open(HISTORY_LOG_PATH, "w") as f:
         json.dump(history, f, indent=2)
 
-
 # ----------------------------------------------------
-# 6. MAIN
+# 6. MAIN EXPERIMENT FUNCTION
 # ----------------------------------------------------
 
-def main():
+def run_experiment(embedding_type):
+    """Runs the training and validation process for a specific embedding type."""
+    
+    # 1. Update Configuration for the current run
+    current_config = GLOBAL_CONFIG.copy()
+    current_config["EMBEDDING_TYPE"] = embedding_type
+    
+    print(f"\n========================================================")
+    print(f"🚀 STARTING EXPERIMENT: {embedding_type.upper()}")
+    print(f"========================================================")
     print(f"Using device: {device}")
-    os.makedirs(CONFIG["RESULTS_DIR"], exist_ok=True)
-
-    embedding_type = CONFIG["EMBEDDING_TYPE"]
-    print(f"Loading embeddings via embedding_utils: {embedding_type}...")
-
-    emb_matrix, emb_dim, tok2idx, idx2tok = get_embedding_matrix(
-        embedding_type,
-        vocab_path=CONFIG["VOCAB_PATH"],
-        repr_dir=osp.dirname(CONFIG["PREPROCESSED_CSV"]),
+    os.makedirs(current_config["RESULTS_DIR"], exist_ok=True)
+    
+    # 2. Load Embeddings (Using the function imported from embedding_utils.py)
+    print(f"Loading embeddings: {embedding_type}...")
+    
+    # Use the imported get_embedding_matrix which handles all types ('glove', 'fasttext', 'tfidf')
+    emb_matrix, emb_dim, tok2idx, _ = get_embedding_matrix(
+        embedding_type, 
+        vocab_path=current_config["VOCAB_PATH"],
+        repr_dir=osp.dirname(current_config["PREPROCESSED_CSV"])
     )
-
-    # If random: choose an embedding dimension manually
-    if embedding_type == "random":
-        if emb_dim is None:
-            emb_dim = 256
-        emb_matrix = None
-
-    if tok2idx is None:
-        print("ERROR: Failed to load vocab or embedding matrix. Check preprocessing + paths.")
+    
+    # Check for loading failure (matrix is None) for non-random types
+    if emb_matrix is None and embedding_type != 'random':
+        print(f"ERROR: Failed to load {embedding_type} embedding matrix. Skipping run.")
         return
 
-    # Token indices from vocab
-    pad_idx = tok2idx.get("<pad>", 0)
-    sos_idx = tok2idx.get("<start>", 1)
-    eos_idx = tok2idx.get("<end>", 2)
-    unk_idx = tok2idx.get("<unk>", 3)
+    # 3. Update Run-specific Constants
+    global VOCAB_SIZE
+    
+    # Ensure vocab is loaded to get VOCAB_SIZE even if emb_matrix is None ('random')
+    if tok2idx is None:
+        tok2idx, _ = load_vocab(current_config["VOCAB_PATH"])
+        if tok2idx is None:
+             print("FATAL ERROR: Could not load vocabulary. Exiting.")
+             return
 
-    vocab_size = len(tok2idx)
-    CONFIG["EMBEDDING_DIM"] = emb_dim
+    VOCAB_SIZE = len(tok2idx)
+    
+    # Set the final embedding dimension
+    if emb_matrix is not None:
+         current_config["EMBEDDING_DIM"] = emb_dim 
+    else: # For 'random'
+         current_config["EMBEDDING_DIM"] = current_config.get("EMOTION_DIM", 300) 
 
-    print(f"Vocab size: {vocab_size}")
-    print(f"PAD idx: {pad_idx}  SOS idx: {sos_idx}  EOS idx: {eos_idx}  UNK idx: {unk_idx}")
-    print(f"Embedding dim: {emb_dim}")
-
-    # --- Models ---
-    encoder = CustomCNNEncoder(output_dim=CONFIG["IMAGE_FEATURE_DIM"]).to(device)
+    # 4. Initialize Models
+    encoder = CustomCNNEncoder(output_dim=current_config["IMAGE_FEATURE_DIM"]).to(device)
     decoder = EmotionLSTMDecoder(
-        vocab_size=vocab_size,
-        embed_dim=CONFIG["EMBEDDING_DIM"],
-        hidden_size=CONFIG["HIDDEN_SIZE"],
-        num_emotions=CONFIG["NUM_EMOTIONS"],
-        image_feature_dim=CONFIG["IMAGE_FEATURE_DIM"],
-        dropout_rate=CONFIG["DROPOUT_RATE"],
-        embedding_matrix=emb_matrix,
+        vocab_size=VOCAB_SIZE,
+        embed_dim=current_config["EMBEDDING_DIM"],
+        hidden_size=current_config["HIDDEN_SIZE"],
+        num_emotions=current_config["NUM_EMOTIONS"],
+        image_feature_dim=current_config["IMAGE_FEATURE_DIM"],
+        dropout_rate=current_config["DROPOUT_RATE"],
+        embedding_matrix=emb_matrix
     ).to(device)
-
-    # --- Data ---
-    train_data = ArtemisCaptioningDataset(
-        CONFIG["PREPROCESSED_CSV"], "train", CONFIG["IMAGE_FEAT_DIR"]
-    )
-    val_data = ArtemisCaptioningDataset(
-        CONFIG["PREPROCESSED_CSV"], "val", CONFIG["IMAGE_FEAT_DIR"]
-    )
-
-    train_loader = DataLoader(
-        train_data,
-        batch_size=CONFIG["BATCH_SIZE"],
-        shuffle=True,
-        drop_last=True,
-    )
-    val_loader = DataLoader(
-        val_data,
-        batch_size=CONFIG["BATCH_SIZE"],
-        shuffle=False,
-    )
-
-    # --- Loss & Optimizer ---
-    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
+    
+    # 5. DataLoaders
+    train_data = ArtemisCaptioningDataset(current_config["PREPROCESSED_CSV"], 'train', current_config["IMAGE_FEAT_DIR"], current_config["VOCAB_PATH"])
+    val_data = ArtemisCaptioningDataset(current_config["PREPROCESSED_CSV"], 'val', current_config["IMAGE_FEAT_DIR"], current_config["VOCAB_PATH"])
+    train_loader = DataLoader(train_data, batch_size=current_config["BATCH_SIZE"], shuffle=True, drop_last=True)
+    val_loader = DataLoader(val_data, batch_size=current_config["BATCH_SIZE"], shuffle=False)
+    
+    # 6. Loss and Optimizer
+    criterion = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN_ID)
     params = list(encoder.parameters()) + list(decoder.parameters())
-    optimizer = torch.optim.Adam(params, lr=CONFIG["LEARNING_RATE"])
-
-    # --- Training loop ---
-    best_val_loss = float("inf")
-    current_run_history = {
-        "embedding_type": embedding_type,
-        "train_loss_history": [],
-        "val_loss_history": [],
-        "best_val_epoch": -1,
-        "num_epochs": CONFIG["NUM_EPOCHS"],
-    }
-
-    for epoch in range(1, CONFIG["NUM_EPOCHS"] + 1):
-        print(f"\n--- Epoch {epoch}/{CONFIG['NUM_EPOCHS']} ---")
-        train_loss = train_one_epoch(
-            encoder, decoder, train_loader, criterion, optimizer, pad_idx
-        )
-        val_loss = validate_one_epoch(
-            encoder, decoder, val_loader, criterion, pad_idx
-        )
-
+    optimizer = torch.optim.Adam(params, lr=current_config["LEARNING_RATE"])
+    
+    # 7. Training Loop
+    best_val_loss = float('inf')
+    current_run_history = {"embedding_type": embedding_type, "train_loss_history": [], "val_loss_history": [], "best_val_epoch": -1, "config_snapshot": current_config}
+    
+    for epoch in range(1, current_config["NUM_EPOCHS"] + 1):
+        print(f"\n--- Epoch {epoch}/{current_config['NUM_EPOCHS']} ({embedding_type}) ---")
+        train_loss = train_one_epoch(encoder, decoder, train_loader, criterion, optimizer)
+        val_loss = validate_one_epoch(encoder, decoder, val_loader, criterion)
+        
         print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
 
         current_run_history["train_loss_history"].append(train_loss)
@@ -435,21 +428,18 @@ def main():
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             current_run_history["best_val_epoch"] = epoch
-            print("Saving best model checkpoint...")
+            print(f"Saving best model checkpoint for {embedding_type}...")
+            
+            checkpoint_filename = f"best_model_{embedding_type}.pth"
+            torch.save({
+                'encoder_state_dict': encoder.state_dict(),
+                'decoder_state_dict': decoder.state_dict(),
+                'best_val_loss': best_val_loss,
+                'config': current_config
+            }, osp.join(current_config["RESULTS_DIR"], checkpoint_filename))
 
-            ckpt_name = f"best_model_{embedding_type}.pth"
-            ckpt_path = osp.join(CONFIG["RESULTS_DIR"], ckpt_name)
-            torch.save(
-                {
-                    "encoder_state_dict": encoder.state_dict(),
-                    "decoder_state_dict": decoder.state_dict(),
-                    "best_val_loss": best_val_loss,
-                    "config": CONFIG,
-                    "tok2idx": tok2idx,
-                },
-                ckpt_path,
-            )
-
+    # 8. History Summary and Persistence
+    current_run_history["num_epochs"] = current_config["NUM_EPOCHS"]
     current_run_history["final_val_loss"] = val_loss
 
     # --- Save full history ---
@@ -458,9 +448,19 @@ def main():
         full_history[embedding_type] = []
     full_history[embedding_type].append(current_run_history)
     save_full_history(full_history)
+    print(f"\nExperiment {embedding_type.upper()} complete. Final Val Loss: {val_loss:.4f}")
+    print(f"Results logged to {HISTORY_LOG_PATH}")
 
-    print("Training complete.")
-    print(f"Results for this run added to history log at {HISTORY_LOG_PATH}")
+def main():
+    # FIXED: The name "tf-idf" must be "tfidf" to match the logic in embedding_utils.py
+    EMBEDDING_TYPES = ["glove", "fasttext", "tfidf"] 
+    
+    for emb_type in EMBEDDING_TYPES:
+        run_experiment(emb_type)
+        
+    print("\n--------------------------------------------------------")
+    print("✅ All three embedding experiments are complete.")
+    print("--------------------------------------------------------")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,98 @@
+{
+  "glove": [
+    {
+      "image": "edgar-degas_three-heads",
+      "emotion_id": 8,
+      "pred": "else the painting is very very boring and the colors are very very interesting",
+      "gt": "this creates a bit of interest as it makes one wonder who these men are"
+    },
+    {
+      "image": "vincent-van-gogh_still-life-with-red-cabbages-and-onions-1887",
+      "emotion_id": 2,
+      "pred": "the use of color and the colors are very beautiful",
+      "gt": "the garlic on the table is enormous much more so than traditional heads of garlic"
+    },
+    {
+      "image": "ivan-shishkin_view-in-the-vicinity-of-st-petersburg-1856",
+      "emotion_id": 6,
+      "pred": "the woman looks like she is wearing a sad and sad and sad",
+      "gt": "the man has his held down like he is upset about something"
+    },
+    {
+      "image": "pyotr-konchalovsky_still-life-grenades-1954",
+      "emotion_id": 0,
+      "pred": "the woman is wearing a <unk> and the woman is wearing a <unk>",
+      "gt": "the fruits and wine make for a joyous occasion it seems"
+    },
+    {
+      "image": "vincent-van-gogh_field-with-flowers-1888(1)",
+      "emotion_id": 1,
+      "pred": "the people are enjoying a nice day on the water",
+      "gt": "the field is filled with freshly bloomed wildflowers"
+    }
+  ],
+  "fasttext": [
+    {
+      "image": "edgar-degas_three-heads",
+      "emotion_id": 8,
+      "pred": "else the painting is very interesting and the colors are very calming",
+      "gt": "this creates a bit of interest as it makes one wonder who these men are"
+    },
+    {
+      "image": "vincent-van-gogh_still-life-with-red-cabbages-and-onions-1887",
+      "emotion_id": 2,
+      "pred": "the painting is very beautiful and the colors are very beautiful",
+      "gt": "the garlic on the table is enormous much more so than traditional heads of garlic"
+    },
+    {
+      "image": "ivan-shishkin_view-in-the-vicinity-of-st-petersburg-1856",
+      "emotion_id": 6,
+      "pred": "the woman looks like he is a sad and sad",
+      "gt": "the man has his held down like he is upset about something"
+    },
+    {
+      "image": "pyotr-konchalovsky_still-life-grenades-1954",
+      "emotion_id": 0,
+      "pred": "the man looks like he is a <unk> and the man 's face is very funny",
+      "gt": "the fruits and wine make for a joyous occasion it seems"
+    },
+    {
+      "image": "vincent-van-gogh_field-with-flowers-1888(1)",
+      "emotion_id": 1,
+      "pred": "the painting is a very peaceful painting of the painting",
+      "gt": "the field is filled with freshly bloomed wildflowers"
+    }
+  ],
+  "tfidf": [
+    {
+      "image": "edgar-degas_three-heads",
+      "emotion_id": 8,
+      "pred": "else the painting is very interesting and the colors are very interesting",
+      "gt": "this creates a bit of interest as it makes one wonder who these men are"
+    },
+    {
+      "image": "vincent-van-gogh_still-life-with-red-cabbages-and-onions-1887",
+      "emotion_id": 2,
+      "pred": "the painting looks like a beautiful painting of a beautiful painting",
+      "gt": "the garlic on the table is enormous much more so than traditional heads of garlic"
+    },
+    {
+      "image": "ivan-shishkin_view-in-the-vicinity-of-st-petersburg-1856",
+      "emotion_id": 6,
+      "pred": "the woman looks like he is sad and sad",
+      "gt": "the man has his held down like he is upset about something"
+    },
+    {
+      "image": "pyotr-konchalovsky_still-life-grenades-1954",
+      "emotion_id": 0,
+      "pred": "the man looks like he is wearing a <unk> and <unk>",
+      "gt": "the fruits and wine make for a joyous occasion it seems"
+    },
+    {
+      "image": "vincent-van-gogh_field-with-flowers-1888(1)",
+      "emotion_id": 1,
+      "pred": "looks like a peaceful day with the water and the water in the painting",
+      "gt": "the field is filled with freshly bloomed wildflowers"
+    }
+  ]
+}

@@ -23,6 +23,14 @@
             "image_feature_dim": 256,
             "hidden_size": 256,
             "embedding_type": "fasttext"
+        },
+        {
+            "timestamp": "2025-12-04T01:18:43.669171",
+            "val_loss": 4.542716481438063,
+            "bleu_4": 0.04225492686757635,
+            "image_feature_dim": 256,
+            "hidden_size": 256,
+            "embedding_type": "fasttext"
         }
     ]
 }
