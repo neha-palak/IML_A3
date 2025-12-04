@@ -5,7 +5,6 @@ embedding_utils.py
 Shared helpers for loading vocab and building embedding matrices for
 different text representation strategies:
 
-- random      : normal init, trainable
 - glove       : new_preprocessed/emb_glove_300d.npy
 - fasttext    : new_preprocessed/emb_fasttext_300d.npy
 - tfidf       : builds word-level embeddings using TF-IDF + TruncatedSVD
@@ -21,7 +20,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
 
 
-# ---------- vocab helpers ----------
+# vocab helpers
 
 def load_vocab(vocab_path):
     """Return (token_to_idx, idx_to_token)."""
@@ -33,7 +32,7 @@ def load_vocab(vocab_path):
     return tok2idx, idx2tok
 
 
-# ---------- TF-IDF word embedding helper ----------
+# TF-IDF word embedding helper
 
 def build_tfidf_embedding_matrix(
     tok2idx,

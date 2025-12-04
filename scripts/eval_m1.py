@@ -1,23 +1,3 @@
-#!/usr/bin/env python3
-"""
-eval_m1.py  — Evaluation for CNN + Emotion-Aware LSTM (new_m1.py)
-
-Evaluates THREE embeddings:
-    • glove
-    • fasttext
-    • tfidf
-
-Per embedding:
-    - loads checkpoint best_model_<embedding>.pth
-    - greedy-decodes captions for test split
-    - removes "*" and emotion-prefix like "something else"
-    - computes BLEU-4, ROUGE-1-F, ROUGE-L-F
-    - prints 5 example predictions
-    - saves JSON output:
-          m1_eval_summary.json
-          m1_eval_samples.json
-"""
-
 import os
 import os.path as osp
 import json
@@ -33,7 +13,6 @@ import torch
 import torch.nn.functional as F
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
-# -------- import from new_m1.py --------
 from scripts.M1_CNN import (
     CustomCNNEncoder,
     EmotionLSTMDecoder,
@@ -42,13 +21,9 @@ from scripts.M1_CNN import (
     device,
 )
 
-# -------- import embedding utils (handles glove / fasttext / tfidf) --------
 from embedding_utils import get_embedding_matrix
 
 
-# -----------------------------------------------------
-# Utility: Load vocab
-# -----------------------------------------------------
 def load_vocab(path):
     with open(path, "rb") as f:
         vocab = pickle.load(f)
@@ -67,10 +42,6 @@ PAD_TOKEN_ID = 0
 START_TOKEN_ID = 1
 END_TOKEN_ID = 2
 
-
-# -----------------------------------------------------
-# Utility: Clean captions
-# -----------------------------------------------------
 EMOTION_WORDS = [
     "amusement", "contentment", "awe", "excitement", "fear",
     "anger", "sadness", "disgust", "something", "something else"
@@ -82,20 +53,15 @@ def clean_caption(text: str) -> str:
     if text is None:
         return ""
 
-    # remove literal '*' characters
     text = text.replace("*", "").strip()
     words = text.split()
 
-    # if first word is an emotion word, drop it
+    # dropped if first word is an emotion word
     if len(words) > 0 and words[0] in EMOTION_WORDS:
         words = words[1:]
 
     return " ".join(words).strip()
 
-
-# -----------------------------------------------------
-# Greedy decoding for CNN+LSTM
-# -----------------------------------------------------
 def greedy_decode(encoder, decoder, image, emo_id, idx2tok, max_len):
     """
     Greedy decoding for one image-emotion pair.
@@ -145,9 +111,6 @@ def greedy_decode(encoder, decoder, image, emo_id, idx2tok, max_len):
     return clean_caption(caption_raw)
 
 
-# -----------------------------------------------------
-# ROUGE helpers
-# -----------------------------------------------------
 def rouge_1_f(pred: str, ref: str) -> float:
     pred_tokens = pred.split()
     ref_tokens = ref.split()
@@ -196,21 +159,19 @@ def rouge_l_f(pred: str, ref: str) -> float:
     return 2 * prec * rec / (prec + rec)
 
 
-# -----------------------------------------------------
-# Main evaluation
-# -----------------------------------------------------
+# final evaluation
 def evaluate_all_embeddings():
 
     EMBEDDINGS = ["glove", "fasttext", "tfidf"]
 
-    # load vocab and set token IDs
+    # setting token IDs
     tok2idx, idx2tok = load_vocab(CONFIG["VOCAB_PATH"])
     global PAD_TOKEN_ID, START_TOKEN_ID, END_TOKEN_ID
     PAD_TOKEN_ID = tok2idx.get("<pad>", 0)
     START_TOKEN_ID = tok2idx.get("<start>", 1)
     END_TOKEN_ID = tok2idx.get("<end>", 2)
 
-    # load CSV and restrict to test
+    # loading test.csv file
     df = pd.read_csv(CONFIG["PREPROCESSED_CSV"])
     test_df = df[df["split"] == "test"].reset_index(drop=True)
 
@@ -218,11 +179,9 @@ def evaluate_all_embeddings():
     sample_outputs = {}
 
     for emb in EMBEDDINGS:
-        print("\n==============================================")
         print(f"Evaluating embedding: {emb.upper()}")
-        print("==============================================")
 
-        # load checkpoint
+        # checkpoint
         ckpt_path = osp.join(CONFIG["RESULTS_DIR"], f"best_model_{emb}.pth")
         if not osp.exists(ckpt_path):
             print(f"[WARN] Missing checkpoint: {ckpt_path}")
@@ -231,14 +190,14 @@ def evaluate_all_embeddings():
         ck = torch.load(ckpt_path, map_location=device)
         cfg = ck["config"]
 
-        # load embedding matrix (glove / fasttext / tfidf) from embedding_utils
+        # load embedding matrix from embedding_utils
         emb_matrix, emb_dim, _, _ = get_embedding_matrix(
             emb,
             vocab_path=CONFIG["VOCAB_PATH"],
             repr_dir=osp.dirname(CONFIG["PREPROCESSED_CSV"]),
         )
 
-        # build models
+        # building models
         encoder = CustomCNNEncoder(cfg["IMAGE_FEATURE_DIM"]).to(device)
         decoder = EmotionLSTMDecoder(
             vocab_size=len(tok2idx),
@@ -255,9 +214,7 @@ def evaluate_all_embeddings():
 
         print("Loaded model.")
 
-        # -------------------
-        # Compute metrics
-        # -------------------
+        # metrics
         total_bleu4 = 0.0
         total_rouge1 = 0.0
         total_rougeL = 0.0
@@ -307,7 +264,7 @@ def evaluate_all_embeddings():
                 total_rougeL += rL
                 n += 1
 
-            # Save up to 5 samples for this embedding
+            # Saving 5 samples
             if len(samples) < 5:
                 samples.append({
                     "image": painting,
@@ -330,9 +287,8 @@ def evaluate_all_embeddings():
         print(f"[{emb}] ROUGE-1: {all_results[emb]['rouge1_f']:.4f}")
         print(f"[{emb}] ROUGE-L: {all_results[emb]['rougeL_f']:.4f}")
 
-    # -----------------------------------------------------
-    # Save JSON outputs
-    # -----------------------------------------------------
+    # JSON outputs
+
     out_dir = CONFIG["RESULTS_DIR"]
     os.makedirs(out_dir, exist_ok=True)
 

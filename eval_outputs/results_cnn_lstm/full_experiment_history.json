@@ -1,132 +1,212 @@
 {
-    "fasttext": [
-        {
-            "train_loss_history": [
-                6.069523789031665,
-                5.27927745373597,
-                5.006738070479748
-            ],
-            "val_loss_history": [
-                5.380962415914956,
-                5.053904827085362,
-                4.83575338252408
-            ],
-            "best_val_epoch": 3,
-            "embedding_type": "fasttext",
-            "num_epochs": 3,
-            "final_val_loss": 4.83575338252408
-        },
-        {
-            "train_loss_history": [
-                6.050599489497892,
-                5.308136744313867,
-                5.015051799917692
-            ],
-            "val_loss_history": [
-                5.410289174292878,
-                5.069990907590386,
-                4.8382007183764095
-            ],
-            "best_val_epoch": 3,
-            "embedding_type": "fasttext",
-            "num_epochs": 3,
-            "final_val_loss": 4.8382007183764095
-        },
-        {
-            "train_loss_history": [
-                6.069523789031665,
-                5.27927745373597,
-                5.006738070479748
-            ],
-            "val_loss_history": [
-                5.380962415914956,
-                5.053904827085362,
-                4.83575338252408
-            ],
-            "best_val_epoch": 3,
-            "embedding_type": "fasttext",
-            "num_epochs": 3,
-            "final_val_loss": 4.83575338252408
-        },
-        {
-            "embedding_type": "fasttext",
-            "train_loss_history": [
-                6.068856353067603,
-                5.2598576771770835,
-                4.978552416827155,
-                4.788125774841933,
-                4.6486014610697
-            ],
-            "val_loss_history": [
-                5.360817864473649,
-                5.022750780558688,
-                4.807318523971319,
-                4.655634989948734,
-                4.542716481438063
-            ],
-            "best_val_epoch": 5,
-            "config_snapshot": {
-                "EMBEDDING_TYPE": "fasttext",
-                "PREPROCESSED_CSV": "new_preprocessed/artemis_preprocessed.csv",
-                "VOCAB_PATH": "new_preprocessed/vocab.pkl",
-                "IMAGE_FEAT_DIR": "new_preprocessed/features",
-                "RESULTS_DIR": "eval_outputs/results_cnn_lstm",
-                "IMAGE_SIZE": 128,
-                "IMAGE_FEATURE_DIM": 256,
-                "EMOTION_DIM": 300,
-                "HIDDEN_SIZE": 256,
-                "DROPOUT_RATE": 0.5,
-                "NUM_EMOTIONS": 9,
-                "MAX_LEN": 25,
-                "BATCH_SIZE": 32,
-                "NUM_EPOCHS": 5,
-                "LEARNING_RATE": 0.0001,
-                "SEED": 42,
-                "EMBEDDING_DIM": 300
-            },
-            "num_epochs": 5,
-            "final_val_loss": 4.542716481438063
-        }
-    ],
-    "glove": [
-        {
-            "embedding_type": "glove",
-            "train_loss_history": [
-                5.990260463417037,
-                5.137659147690594,
-                4.86719928304782,
-                4.690360145531526,
-                4.565003064352455
-            ],
-            "val_loss_history": [
-                5.238130615581659,
-                4.898773394132915,
-                4.6908724582720955,
-                4.54981671899006,
-                4.445484177655889
-            ],
-            "best_val_epoch": 5,
-            "config_snapshot": {
-                "EMBEDDING_TYPE": "glove",
-                "PREPROCESSED_CSV": "new_preprocessed/artemis_preprocessed.csv",
-                "VOCAB_PATH": "new_preprocessed/vocab.pkl",
-                "IMAGE_FEAT_DIR": "new_preprocessed/features",
-                "RESULTS_DIR": "eval_outputs/results_cnn_lstm",
-                "IMAGE_SIZE": 128,
-                "IMAGE_FEATURE_DIM": 256,
-                "EMOTION_DIM": 300,
-                "HIDDEN_SIZE": 256,
-                "DROPOUT_RATE": 0.5,
-                "NUM_EMOTIONS": 9,
-                "MAX_LEN": 25,
-                "BATCH_SIZE": 32,
-                "NUM_EPOCHS": 5,
-                "LEARNING_RATE": 0.0001,
-                "SEED": 42,
-                "EMBEDDING_DIM": 300
-            },
-            "num_epochs": 5,
-            "final_val_loss": 4.445484177655889
-        }
-    ]
+  "fasttext": [
+    {
+      "embedding_type": "fasttext",
+      "train_loss_history": [
+        6.030145944013895,
+        5.5003872909437215,
+        5.208383285082304,
+        4.9734726611025994,
+        4.775817170102372,
+        4.635948301380516,
+        4.5273891215310815,
+        4.437107559622523,
+        4.360808022681125,
+        4.293069559624392,
+        4.233005800138511,
+        4.178777122090006,
+        4.129169022595441,
+        4.082762371440898,
+        4.038772830596337,
+        3.995281017064369,
+        3.9536179528277144,
+        3.9136180894666928,
+        3.8723962911513454,
+        3.834403732902983
+      ],
+      "val_loss_history": [
+        5.490566076628683,
+        5.246712976295612,
+        5.012407066133589,
+        4.799376170292687,
+        4.6450121772407975,
+        4.536513796571647,
+        4.449995106009298,
+        4.377962752731562,
+        4.320169560091933,
+        4.272890054993066,
+        4.23137830840066,
+        4.198296291899376,
+        4.170478502004957,
+        4.139214375280215,
+        4.114082973339141,
+        4.092627382888902,
+        4.0751142135555005,
+        4.058790730548278,
+        4.04473519223513,
+        4.028262544661803
+      ],
+      "best_val_epoch": 20,
+      "num_epochs": 20,
+      "config_snapshot": {
+        "EMBEDDING_TYPE": "fasttext",
+        "PREPROCESSED_CSV": "new_preprocessed/artemis_preprocessed.csv",
+        "VOCAB_PATH": "new_preprocessed/vocab.pkl",
+        "IMAGE_FEAT_DIR": "new_preprocessed/features",
+        "RESULTS_DIR": "eval_outputs/results_cnn_lstm",
+        "IMAGE_SIZE": 128,
+        "IMAGE_FEATURE_DIM": 256,
+        "HIDDEN_SIZE": 256,
+        "DROPOUT_RATE": 0.2,
+        "NUM_EMOTIONS": 9,
+        "MAX_LEN": 25,
+        "BATCH_SIZE": 32,
+        "NUM_EPOCHS": 20,
+        "LEARNING_RATE": 0.0001,
+        "SEED": 42,
+        "EMBEDDING_DIM": 300
+      },
+      "final_val_loss": 4.028262544661803
+    }
+  ],
+  "tfidf": [
+    {
+      "embedding_type": "tfidf",
+      "train_loss_history": [
+        5.962113570623588,
+        5.225091289590906,
+        4.950272109094168,
+        4.743730703989665,
+        4.578707684139241,
+        4.451789986374032,
+        4.348475959565905,
+        4.261555050173376,
+        4.184236011613808,
+        4.113932870392107,
+        4.04995703493428,
+        3.9906244491919494,
+        3.9357075888207156,
+        3.883236253023827,
+        3.8344975699726334,
+        3.7877853453329147,
+        3.743549869610713,
+        3.701482340820834,
+        3.662090259399849,
+        3.6235515310553743
+      ],
+      "val_loss_history": [
+        5.305801343443044,
+        4.995340914339633,
+        4.776576247696856,
+        4.608697636876982,
+        4.4820935058051115,
+        4.391574116892699,
+        4.316033193770038,
+        4.253703729187272,
+        4.20489112072615,
+        4.159491482703479,
+        4.125844536940031,
+        4.093270479530562,
+        4.0642342075684335,
+        4.039782120866084,
+        4.023499352155335,
+        4.005781339886856,
+        3.992031977831215,
+        3.980443338242228,
+        3.9720045794463936,
+        3.966413890314984
+      ],
+      "best_val_epoch": 20,
+      "num_epochs": 20,
+      "config_snapshot": {
+        "EMBEDDING_TYPE": "tfidf",
+        "PREPROCESSED_CSV": "new_preprocessed/artemis_preprocessed.csv",
+        "VOCAB_PATH": "new_preprocessed/vocab.pkl",
+        "IMAGE_FEAT_DIR": "new_preprocessed/features",
+        "RESULTS_DIR": "eval_outputs/results_cnn_lstm",
+        "IMAGE_SIZE": 128,
+        "IMAGE_FEATURE_DIM": 256,
+        "HIDDEN_SIZE": 256,
+        "DROPOUT_RATE": 0.2,
+        "NUM_EMOTIONS": 9,
+        "MAX_LEN": 25,
+        "BATCH_SIZE": 32,
+        "NUM_EPOCHS": 20,
+        "LEARNING_RATE": 0.0001,
+        "SEED": 42,
+        "EMBEDDING_DIM": 2084
+      },
+      "final_val_loss": 3.966413890314984
+    }
+  ],
+  "glove": [
+    {
+      "embedding_type": "glove",
+      "train_loss_history": [
+        5.9990647932742736,
+        5.36003617139963,
+        5.060489649786229,
+        4.837239842808824,
+        4.668469510526738,
+        4.541218432945404,
+        4.439742207187533,
+        4.352932567270393,
+        4.277562380176664,
+        4.210483237209483,
+        4.1473665570261815,
+        4.0906621686413756,
+        4.036746526375795,
+        3.9856530964544357,
+        3.9366800442040817,
+        3.889508895724587,
+        3.845605163492708,
+        3.802712179996349,
+        3.7619671865745827,
+        3.722470348716801
+      ],
+      "val_loss_history": [
+        5.421624962330543,
+        5.105262285615099,
+        4.860745111196851,
+        4.674327103545622,
+        4.534372167600846,
+        4.4357811119274935,
+        4.352369491609706,
+        4.283405864221781,
+        4.224840057693199,
+        4.175670472520853,
+        4.13116181117203,
+        4.096017408845774,
+        4.062527534463158,
+        4.034058847264578,
+        4.009773941162131,
+        3.9890625503968717,
+        3.9714391658858927,
+        3.953972215503242,
+        3.9427781847767944,
+        3.9270056894798877
+      ],
+      "best_val_epoch": 20,
+      "num_epochs": 20,
+      "config_snapshot": {
+        "EMBEDDING_TYPE": "glove",
+        "PREPROCESSED_CSV": "new_preprocessed/artemis_preprocessed.csv",
+        "VOCAB_PATH": "new_preprocessed/vocab.pkl",
+        "IMAGE_FEAT_DIR": "new_preprocessed/features",
+        "RESULTS_DIR": "eval_outputs/results_cnn_lstm",
+        "IMAGE_SIZE": 128,
+        "IMAGE_FEATURE_DIM": 256,
+        "HIDDEN_SIZE": 256,
+        "DROPOUT_RATE": 0.2,
+        "NUM_EMOTIONS": 9,
+        "MAX_LEN": 25,
+        "BATCH_SIZE": 32,
+        "NUM_EPOCHS": 20,
+        "LEARNING_RATE": 0.0001,
+        "SEED": 42,
+        "EMBEDDING_DIM": 300
+      },
+      "final_val_loss": 3.9270056894798877
+    }
+  ]
 }
