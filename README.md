@@ -14,11 +14,18 @@ Each model supports three text embedding strategies:
 The project includes full preprocessing, training, evaluation, prediction, and attention visualization tools.
 
 
-1. Setup & Installation
-
-Clone and install
-
 2. Dataset Preprocessing
+
+Image:
+* Performed stratified subsampling per art style to get 5500 images
+* The 5500 images were saved to new_preprocessed/images_subset
+* Images were then resized to 128x128
+* Pizel normalized to 0,1 and saved as .npy files in new_preprocessed/features
+
+Text:
+* removed punctuation, converted into lowercase
+* tokenized
+* Later, we embedded the token vectors with emotions to feed into the models
 
 Run this for preprocessing
 ```
@@ -70,3 +77,34 @@ Checkpoints saved:
 ```
 new_checkpoints/<embedding>/m2_<embedding>_best.pt
 ```
+4. Evaluation
+1: cnn + lstm
+2: transformer
+
+```
+python scripts/eval_m{1/2}.py
+
+```
+Outputs:
+```
+eval_outputs/m{1/2}_eval_summary.json
+eval_outputs/m{1/2}_eval_samples.json
+```
+Metrics:
+	•	BLEU-4
+    •	BLEU-1
+	•	ROUGE-1 F
+	•	ROUGE-L F
+	•	5 clean sample predictions per embedding
+
+5. Predict
+
+```ArtEmis_Caption_Generation.ipynb``` calls the ```predict_single_image``` function from ```viva_predict.py``` file, which we created to generate captions for any images, and not just images from our subsampled folder
+```predict.py``` can only be used to generate captions for images in the ```new_preprocessed/images_subset``` folder
+* Inside the ```ArtEmis_Caption_Generation.ipynb```, scroll to the 'FINAL CAPTION GENERATION' section
+* Save the desired image in 'viva_images' folder as .jpg
+* Put the name of the image in 'IMAGE_NAME' variable
+* Imput the desired EMOTION_ID
+* Run the script
+* It generated captions for both the models per embedding type
+![alt text](image.png)
