@@ -442,7 +442,7 @@ def main():
     parser.add_argument("--vocab", type=str, default="new_preprocessed/vocab.pkl")
     parser.add_argument("--repr-dir", type=str, default="new_preprocessed")
     parser.add_argument("--embedding-type", type=str,
-                        default="glove",
+                        default="tfidf",
                         choices=[ "glove", "fasttext", "tfidf"])
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-epochs", type=int, default=20)

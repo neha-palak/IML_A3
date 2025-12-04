@@ -1,34 +1,3 @@
-#!/usr/bin/env python3
-"""
-text_representation.py
-
-Builds text representations for the new preprocessing pipeline that produces:
-
-    new_preprocessed/artemis_preprocessed.csv
-    new_preprocessed/vocab.pkl
-
-Implements 3 embedding strategies:
-
-1. TF-IDF + dimensionality reduction (TruncatedSVD ~ PCA for sparse data)
-   - Fits on TRAIN split utter_clean text.
-   - Saves:
-        new_preprocessed/tfidf_vectorizer.pkl
-        new_preprocessed/tfidf_svd.pkl
-        (optional) per-row reduced vectors in new_preprocessed/tfidf_npy/
-
-2. Pre-trained GloVe embeddings
-   - raw_data/glove.6B.300d.txt  (edit path in CONFIG if different)
-   - Saves: new_preprocessed/emb_glove_300d.npy
-
-3. Pre-trained FastText embeddings
-   - raw_data/wiki-news-300d-1M-subword.vec  (edit path in CONFIG if different)
-   - Saves: new_preprocessed/emb_fasttext_300d.npy
-
-Also writes:
-    new_preprocessed/representation_summary.json
-with coverage & TF-IDF stats.
-"""
-
 import os
 import os.path as osp
 import pickle
@@ -43,9 +12,6 @@ from tqdm import tqdm
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
 
-# ------------------------------------------------------------------
-# CONFIG – edit paths / hyperparams here
-# ------------------------------------------------------------------
 CONFIG = {
     # paths
     "csv_path": "new_preprocessed/artemis_preprocessed.csv",
@@ -53,23 +19,12 @@ CONFIG = {
     "out_dir": "new_preprocessed",
     "glove_path": "raw_data/glove.6B.300d.txt",
     "fasttext_path": "raw_data/wiki-news-300d-1M-subword.vec",
-
-    # TF-IDF
     "max_features": 20000,
     "n_components": 2084,     # dimensionality after SVD (will be clipped if > n_features)
-    "save_tfidf_npy": True,  # save per-row reduced vectors for train/val/test
-
-    # FastText loading
-    "fasttext_max_load": 150000,  # max lines to scan (to limit RAM). None => full.
-
-    # misc
+    "save_tfidf_npy": True,  
+    "fasttext_max_load": 150000,  # max lines to scan (to limit RAM)
     "seed": 42,
 }
-
-
-# ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
 SPECIAL_TOKENS = ["<pad>", "<start>", "<end>", "<unk>"]
 
 def load_vocab(vocab_path):
@@ -81,11 +36,6 @@ def load_vocab(vocab_path):
     return tok2idx
 
 def load_preprocessed_csv(csv_path):
-    """
-    Loads artemis_preprocessed.csv and returns the dataframe.
-    Assumes columns:
-        utter_clean, tokens_str, split, ...
-    """
     df = pd.read_csv(csv_path)
     if "utter_clean" not in df.columns:
         raise RuntimeError("CSV must contain column 'utter_clean'.")
@@ -94,9 +44,6 @@ def load_preprocessed_csv(csv_path):
     return df
 
 def tokens_from_str_column(series):
-    """
-    Convert tokens_str (space-separated tokens) into list[list[str]].
-    """
     out = []
     for s in series.fillna(""):
         if isinstance(s, str):
@@ -105,8 +52,6 @@ def tokens_from_str_column(series):
         else:
             out.append([])
     return out
-
-# ------------ GloVe / FastText loaders ------------
 
 def load_glove_vectors(glove_path, token_set):
     found = {}
@@ -133,7 +78,6 @@ def load_fasttext_vectors(ft_path, token_set, max_load=None):
     print(f"Reading FastText from {ft_path} ...")
     with open(ft_path, "r", encoding="utf8", errors="ignore") as f:
         header = f.readline()
-        # if header is "n d", skip; else go back
         if len(header.split()) != 2 or not header.split()[1].isdigit():
             f.seek(0)
         for i, line in enumerate(tqdm(f, desc="FastText lines")):
@@ -179,8 +123,6 @@ def occurrence_coverage(tokens_lists, found_vecs):
                 covered += 1
     return covered / total if total > 0 else 0.0
 
-# ------------ TF-IDF helpers ------------
-
 def fit_tfidf(train_texts, max_features=20000):
     tfidf = TfidfVectorizer(
         max_features=max_features,
@@ -191,18 +133,12 @@ def fit_tfidf(train_texts, max_features=20000):
     return tfidf, X
 
 def fit_svd(X_sparse, n_components, seed=42):
-    # clip to valid range
     n_components = min(n_components, X_sparse.shape[1] - 1) if X_sparse.shape[1] > 1 else 1
     svd = TruncatedSVD(n_components=n_components, random_state=seed)
     Xr = svd.fit_transform(X_sparse)
     return svd, Xr
 
 def save_tfidf_split_npy(df, split_name, tfidf, svd, out_dir):
-    """
-    For a given split ('train'/'val'/'test'), transform utter_clean texts
-    and save each reduced TF-IDF vector as .npy.
-    Filenames: tfidf_npy/{split}__{rowidx:06d}.npy
-    """
     sub = df[df["split"] == split_name]
     if len(sub) == 0:
         return 0
@@ -216,26 +152,17 @@ def save_tfidf_split_npy(df, split_name, tfidf, svd, out_dir):
         np.save(path, vec.astype("float32"))
     return len(sub)
 
-
-# ------------------------------------------------------------------
-# MAIN
-# ------------------------------------------------------------------
 def main(cfg):
     os.makedirs(cfg.out_dir, exist_ok=True)
-
-    # ----- load vocab + CSV -----
     token_to_idx = load_vocab(cfg.vocab_path)
     vocab_size = len(token_to_idx)
     print("Vocab size:", vocab_size)
 
     df = load_preprocessed_csv(cfg.csv_path)
     print("Total rows in CSV:", len(df))
-
-    # recover token lists from tokens_str (for coverage stats)
     if "tokens_str" in df.columns:
         all_tokens_lists = tokens_from_str_column(df["tokens_str"])
     else:
-        # fallback: basic split of utter_clean
         all_tokens_lists = tokens_from_str_column(df["utter_clean"])
 
     train_df = df[df["split"] == "train"]
@@ -248,14 +175,9 @@ def main(cfg):
         "tfidf": {}
     }
 
-    # ==============================================================
-    # 1) TF-IDF + SVD
-    # ==============================================================
     print("\n[1] TF-IDF + SVD")
     tfidf, X_train_sparse = fit_tfidf(train_texts, max_features=cfg.max_features)
     print("TF-IDF matrix shape (train):", X_train_sparse.shape)
-
-    # save vectorizer
     tfidf_path = osp.join(cfg.out_dir, "tfidf_vectorizer.pkl")
     with open(tfidf_path, "wb") as f:
         pickle.dump(tfidf, f)
@@ -281,10 +203,7 @@ def main(cfg):
         for split_name in ["train", "val", "test"]:
             cnt = save_tfidf_split_npy(df, split_name, tfidf, svd, cfg.out_dir)
             print(f"  {split_name}: saved {cnt} vectors")
-
-    # ==============================================================
-    # 2) GloVe
-    # ==============================================================
+            
     if cfg.glove_path and osp.exists(cfg.glove_path):
         print("\n[2] GloVe embeddings")
         token_set = set(token_to_idx.keys())
@@ -314,9 +233,6 @@ def main(cfg):
     else:
         print("\n[2] GloVe embeddings: path not set or file missing, skipping.")
 
-    # ==============================================================
-    # 3) FastText
-    # ==============================================================
     if cfg.fasttext_path and osp.exists(cfg.fasttext_path):
         print("\n[3] FastText embeddings")
         token_set = set(token_to_idx.keys())
@@ -346,17 +262,13 @@ def main(cfg):
                 "found_tokens": int(len(ft_found)),
             }
     else:
-        print("\n[3] FastText embeddings: path not set or file missing, skipping.")
+        print("\n[3] FastText embeddings: path not set or file missing.")
 
-    # ==============================================================
-    # Save summary
-    # ==============================================================
     summary_path = osp.join(cfg.out_dir, "representation_summary.json")
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
     print("\nSaved representation summary ->", summary_path)
     print("Done.")
-
 
 if __name__ == "__main__":
     args = SimpleNamespace(**CONFIG)

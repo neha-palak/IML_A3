@@ -1,18 +1,3 @@
-#!/usr/bin/env python3
-"""
-predict_vlt.py
-
-Interactive prediction script for viva / notebook usage.
-
-Now supports:
-- Vision-Language Transformer (VLT) with emotion conditioning
-- CNN + Emotion-aware LSTM (M1) with three embeddings: glove, fasttext, tfidf
-
-Usage (in notebook):
-    from scripts.predict_vlt import predict_single_image
-    predict_single_image("my_image_name", emotion_id=1, images_root="viva_images")
-"""
-
 import json
 from pathlib import Path
 from typing import Dict, List, Tuple, Any
@@ -27,16 +12,9 @@ import matplotlib.pyplot as plt
 from M2_transformers import VisionLanguageTransformerEmotion
 from M1_CNN import CustomCNNEncoder, EmotionLSTMDecoder
 
-# ---------------------------------------------------------------------
-# Paths / config
-# ---------------------------------------------------------------------
 DEFAULT_IMAGES_ROOT = "viva_images"
-
-# VLT checkpoints
 CKPT_VLT_GLOVE    = "new_checkpoints/glove/m2_glove_best.pt"
 CKPT_VLT_FASTTEXT = "new_checkpoints/fasttext/m2_fasttext_best.pt"
-
-# CNN+LSTM checkpoints (from new_m1.py training)
 CKPT_CNN_ROOT = "eval_outputs/results_cnn_lstm"  # best_model_glove/fasttext/tfidf.pth
 
 EMO_ID2NAME = {
@@ -47,17 +25,12 @@ EMO_ID2NAME = {
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DEFAULT_PREPROC_SIZE = 128
 
-# GLOBAL CACHES (for notebook usage)
 _CACHED_VLT_MODELS: Dict[str, VisionLanguageTransformerEmotion] = {}
 _CACHED_VLT_VOCABS: Dict[str, Dict[str, Dict]] = {}
 
-_CACHED_CNN_MODELS: Dict[str, Dict[str, Any]] = {}  # name -> {"encoder":..., "decoder":...}
-_CACHED_CNN_VOCABS: Dict[str, Dict[str, Dict]] = {}  # name -> {"tok2idx":..., "idx2tok":...}
+_CACHED_CNN_MODELS: Dict[str, Dict[str, Any]] = {}  
+_CACHED_CNN_VOCABS: Dict[str, Dict[str, Dict]] = {} 
 
-
-# ---------------------------------------------------------------------
-# Helpers: loading / preprocessing
-# ---------------------------------------------------------------------
 def ensure_jpg_path(root: Path, name: str) -> Path:
     p = root / name
     if p.suffix == "":
@@ -66,15 +39,6 @@ def ensure_jpg_path(root: Path, name: str) -> Path:
 
 
 def load_and_preprocess_jpg(images_root: str, image_name: str, size: int):
-    """
-    Load JPG from images_root/image_name(.jpg),
-    resize to (size, size),
-    return:
-        img_tensor: (1,3,H,W) float32 in [0,1]
-        arr       : (H,W,3) numpy float32 in [0,1]
-        jpg_path  : Path
-        npy_path  : same name but .npy (not necessarily existing)
-    """
     root = Path(images_root)
     jpg_path = ensure_jpg_path(root, image_name)
     if not jpg_path.exists():
@@ -118,10 +82,6 @@ def tokens_to_caption(token_ids, idx2tok, eos_idx, pad_idx) -> str:
         words.append(w)
     return " ".join(words)
 
-
-# ---------------------------------------------------------------------
-# VLT loading + decoding
-# ---------------------------------------------------------------------
 def load_vlt_from_ckpt(ckpt_path: str):
     ck = torch.load(ckpt_path, map_location=DEVICE)
     cfg = ck.get("cfg", ck.get("config", None))
@@ -160,11 +120,7 @@ def greedy_vlt(
     idx2tok: Dict[int, str],
     override_max_len: int = 17,
 ) -> str:
-    """
-    Greedy decoding for VLT model.
-
-    override_max_len is used to cap decoding length (for safety with positions).
-    """
+    
     pad_idx = tok2idx["<pad>"]
     sos_idx = tok2idx["<start>"]
     eos_idx = tok2idx["<end>"]
@@ -191,15 +147,7 @@ def greedy_vlt(
     ids = cur.squeeze(0).tolist()
     return tokens_to_caption(ids, idx2tok, eos_idx, pad_idx)
 
-
-# ---------------------------------------------------------------------
-# CNN+LSTM loading + decoding
-# ---------------------------------------------------------------------
 def load_cnn_from_ckpt(emb_type: str):
-    """
-    Load CNN encoder + LSTM decoder + tok2idx
-    from eval_outputs/results_cnn_lstm/best_model_<emb_type>.pth
-    """
     ckpt_path = Path(CKPT_CNN_ROOT) / f"best_model_{emb_type}.pth"
     ck = torch.load(ckpt_path, map_location=DEVICE)
 
@@ -245,11 +193,7 @@ def greedy_cnn(
     tok2idx: Dict[str, int],
     max_len: int = 25,
 ) -> str:
-    """
-    Greedy decoding for the CNN+LSTM model with emotion conditioning.
-    - Skips emotion word if it appears as the first generated token
-    - Removes '*' from the final caption
-    """
+    
     idx2tok = {i: t for t, i in tok2idx.items()}
 
     pad_idx = tok2idx.get("<pad>", 0)
@@ -265,7 +209,7 @@ def greedy_cnn(
     result_ids: List[int] = []
 
     with torch.no_grad():
-        # 1) encode image + init hidden
+        # encode image + init hidden
         img_feat = encoder(img)               # (1, D_img)
         h, c = decoder.init_hidden_state(img_feat, emo)
 
@@ -284,9 +228,6 @@ def greedy_cnn(
                 break
 
             word = idx2tok.get(next_id, "")
-
-            # 👉 if this is the first generated token and it's an emotion word,
-            #    feed it into the LSTM but do NOT keep it in the caption
             if len(result_ids) == 0 and word in EMOTION_WORDS:
                 cur = torch.cat(
                     [cur, torch.tensor([[next_id]], device=DEVICE)],
@@ -304,29 +245,16 @@ def greedy_cnn(
     # Convert ids -> tokens
     tokens = [idx2tok.get(i, "<unk>") for i in result_ids]
     caption = " ".join(tokens)
-
-    # strip asterisks and tidy whitespace
     caption = caption.replace("*", "").strip()
 
     return caption
 
-
-# ---------------------------------------------------------------------
-# NEW: Interactive Notebook Function
-# ---------------------------------------------------------------------
 def predict_single_image(image_name: str, emotion_id: int, images_root: str = DEFAULT_IMAGES_ROOT):
-    """
-    Called from Jupyter Notebook.
+    # Called from Jupyter Notebook.
 
-    Loads VLT & CNN models into cache (on first call), processes one image,
-    and prints captions for:
-        - VLT (glove, fasttext)
-        - CNN+LSTM (glove, fasttext, tfidf where available)
-    """
     global _CACHED_VLT_MODELS, _CACHED_VLT_VOCABS
     global _CACHED_CNN_MODELS, _CACHED_CNN_VOCABS
 
-    # -------- Load VLT models into cache (once) --------
     if not _CACHED_VLT_MODELS:
         print("[INFO] Loading VLT models into cache (first run only)...")
         ckpt_map = {"glove": CKPT_VLT_GLOVE, "fasttext": CKPT_VLT_FASTTEXT}
@@ -343,7 +271,6 @@ def predict_single_image(image_name: str, emotion_id: int, images_root: str = DE
             else:
                 print(f"[WARN] VLT checkpoint not found: {p}")
 
-    # -------- Load CNN models into cache (once) --------
     if not _CACHED_CNN_MODELS:
         print("[INFO] Loading CNN+LSTM models into cache (first run only)...")
         for name in ["glove", "fasttext", "tfidf"]:
@@ -363,8 +290,6 @@ def predict_single_image(image_name: str, emotion_id: int, images_root: str = DE
         print("[ERROR] No models loaded (neither VLT nor CNN).")
         return
 
-    # -------- Preprocess image --------
-    # Use image_size from first VLT model if available, else fallback
     if _CACHED_VLT_MODELS:
         first_model = next(iter(_CACHED_VLT_MODELS.values()))
         img_size = first_model.cfg.get("image_size", DEFAULT_PREPROC_SIZE)
@@ -382,14 +307,12 @@ def predict_single_image(image_name: str, emotion_id: int, images_root: str = DE
         print(f"[ERROR] {e}")
         return
 
-    # -------- Show image --------
     plt.figure(figsize=(4, 4))
     plt.imshow(arr)
     plt.axis("off")
     plt.title(f"{jpg_path.name} ({emo_name})")
     plt.show()
 
-    # -------- Generate captions --------
     print("-" * 60)
     print("VLT (Transformer) predictions:")
     for name, model in _CACHED_VLT_MODELS.items():
@@ -419,10 +342,6 @@ def predict_single_image(image_name: str, emotion_id: int, images_root: str = DE
         print(f"[CNN-{name}]   {cap}")
     print("-" * 60)
 
-
-# ---------------------------------------------------------------------
-# Main (for command line usage)
-# ---------------------------------------------------------------------
 def main():
     import argparse
     parser = argparse.ArgumentParser()

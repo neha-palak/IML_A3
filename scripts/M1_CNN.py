@@ -1,28 +1,3 @@
-#!/usr/bin/env python3
-"""
-M1.py: CNN + Emotion-aware LSTM Captioning model
-
-Supports text embedding types via embedding_utils.get_embedding_matrix:
-- random      : normal init, trainable
-- glove       : uses new_preprocessed/emb_glove_300d.npy
-- fasttext    : uses new_preprocessed/emb_fasttext_300d.npy
-- tfidf       : uses TF-IDF + SVD projections (token-level) built earlier
-
-Assumes:
-- Preprocessed CSV: new_preprocessed/artemis_preprocessed.csv
-  with columns: painting, emotion_label, token_ids_with_emotion_str, split, ...
-- Image features: new_preprocessed/features/<painting>.npy  (H,W,3 in [0,1])
-- Vocab: new_preprocessed/vocab.pkl
-- embedding_utils.py is in Python path and implements get_embedding_matrix(...)
-
-This script will run THREE experiments in sequence:
-    1. GloVe
-    2. FastText
-    3. TF-IDF
-
-and log them all into a shared history JSON.
-"""
-
 import os
 import os.path as osp
 import ast
@@ -36,26 +11,23 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-from embedding_utils import get_embedding_matrix  # <<< central embedding loader
+from embedding_utils import get_embedding_matrix
 
-# ----------------------------------------------------
-# GLOBAL BASE CONFIG  (per-run copy will be made)
-# ----------------------------------------------------
 BASE_CONFIG = {
-    "EMBEDDING_TYPE": "glove",              # will be overridden per run
+    "EMBEDDING_TYPE": "glove",             
     "PREPROCESSED_CSV": "new_preprocessed/artemis_preprocessed.csv",
     "VOCAB_PATH": "new_preprocessed/vocab.pkl",
     "IMAGE_FEAT_DIR": "new_preprocessed/features",
     "RESULTS_DIR": "eval_outputs/results_cnn_lstm",
 
-    "IMAGE_SIZE": 128,                      # used by encoder conv assumptions
-    "IMAGE_FEATURE_DIM": 256,               # encoder output dim
+    "IMAGE_SIZE": 128,                  
+    "IMAGE_FEATURE_DIM": 256, # encoder output dim
     "HIDDEN_SIZE": 256,
     "DROPOUT_RATE": 0.2,
     "NUM_EMOTIONS": 9,
     "MAX_LEN": 25,
     "BATCH_SIZE": 32,
-    "NUM_EPOCHS": 20,                        # increase (e.g., 15–20) for real training
+    "NUM_EPOCHS": 20,                     
     "LEARNING_RATE": 1e-4,
     "SEED": 42,
 }
@@ -64,14 +36,7 @@ torch.manual_seed(BASE_CONFIG["SEED"])
 np.random.seed(BASE_CONFIG["SEED"])
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Shared history path across all runs
 HISTORY_LOG_PATH = osp.join(BASE_CONFIG["RESULTS_DIR"], "full_experiment_history.json")
-
-
-# ----------------------------------------------------
-# 1. DATASET
-# ----------------------------------------------------
 
 class ArtemisCaptioningDataset(Dataset):
     """
@@ -112,29 +77,19 @@ class ArtemisCaptioningDataset(Dataset):
 
         return image_data, emotion_label, caption_input, caption_target, painting_id
 
-
-# ----------------------------------------------------
-# 2. CNN ENCODER
-# ----------------------------------------------------
-
 class CustomCNNEncoder(nn.Module):
-    """
-    Simple CNN that takes an RGB image (B,H,W,3) or (B,3,H,W) and outputs a vector
-    of dimension IMAGE_FEATURE_DIM.
-    """
-
+    #takes an RGB image (B,H,W,3) or (B,3,H,W)
     def __init__(self, output_dim):
         super().__init__()
 
         self.cnn_blocks = nn.Sequential(
-            # assume input ~ 128x128; if 224x224, still works (will end up 14x14)
             nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1), nn.ReLU(),  # 128 -> 64
             nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1), nn.ReLU(),  # 64 -> 32
             nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1), nn.ReLU(),  # 32 -> 16
             nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1), nn.ReLU(),  # 16 -> 8
         )
 
-        final_spatial_dim = 8   # if input 128; if 224 it will be different but still consistent
+        final_spatial_dim = 8   
         final_cnn_channels = 512
         OBSERVED_FLATTENED_SIZE = final_cnn_channels * final_spatial_dim * final_spatial_dim
 
@@ -162,10 +117,6 @@ class CustomCNNEncoder(nn.Module):
         x = self.fc(x)
         return x  # (B, output_dim)
 
-
-# ----------------------------------------------------
-# 3. EMOTION-FUSED LSTM DECODER (2 LAYERS)
-# ----------------------------------------------------
 class EmotionLSTMDecoder(nn.Module):
     def __init__(
         self,
@@ -181,9 +132,8 @@ class EmotionLSTMDecoder(nn.Module):
 
         self.hidden_size = hidden_size
         self.image_feature_dim = image_feature_dim
-        self.num_layers = 2   # <--- keep track of this
+        self.num_layers = 2  
 
-        # 1. Word embedding
         if embedding_matrix is not None:
             self.word_embeddings = nn.Embedding.from_pretrained(
                 torch.tensor(embedding_matrix, dtype=torch.float32),
@@ -192,13 +142,10 @@ class EmotionLSTMDecoder(nn.Module):
             embed_dim = embedding_matrix.shape[1]
         else:
             self.word_embeddings = nn.Embedding(vocab_size, embed_dim)
-
-        # 2. Emotion embedding
         self.emotion_embeddings = nn.Embedding(num_emotions, embed_dim)
 
         self.lstm_input_size = embed_dim
 
-        # 3. Initial state generators
         context_dim = image_feature_dim + embed_dim
         self.h0_generator = nn.Sequential(
             nn.Linear(context_dim, hidden_size),
@@ -211,7 +158,6 @@ class EmotionLSTMDecoder(nn.Module):
             nn.Dropout(dropout_rate),
         )
 
-        # 4. LSTM with 2 layers
         self.lstm = nn.LSTM(
             input_size=self.lstm_input_size,
             hidden_size=hidden_size,
@@ -219,7 +165,6 @@ class EmotionLSTMDecoder(nn.Module):
             num_layers=self.num_layers,
         )
 
-        # 5. Output layer
         self.output_layer = nn.Linear(hidden_size, vocab_size)
         self.dropout_word = nn.Dropout(dropout_rate)
 
@@ -236,7 +181,6 @@ class EmotionLSTMDecoder(nn.Module):
         base_h = self.h0_generator(combined)  # (B, H)
         base_c = self.c0_generator(combined)  # (B, H)
 
-        # repeat for all layers
         h0 = base_h.unsqueeze(0).repeat(self.num_layers, 1, 1)  # (L,B,H)
         c0 = base_c.unsqueeze(0).repeat(self.num_layers, 1, 1)  # (L,B,H)
         return h0, c0
@@ -249,11 +193,6 @@ class EmotionLSTMDecoder(nn.Module):
         lstm_out, _ = self.lstm(word_embeds, (h0, c0))     # (B,T,H)
         logits = self.output_layer(lstm_out)               # (B,T,V)
         return logits
-
-
-# ----------------------------------------------------
-# 4. TRAIN / VAL
-# ----------------------------------------------------
 
 def train_one_epoch(encoder, decoder, dataloader, criterion, optimizer, pad_idx):
     encoder.train()
@@ -317,11 +256,6 @@ def validate_one_epoch(encoder, decoder, dataloader, criterion, pad_idx):
 
     return total_loss / max(1, total_count)
 
-
-# ----------------------------------------------------
-# 5. HISTORY HELPERS
-# ----------------------------------------------------
-
 def load_full_history():
     if osp.exists(HISTORY_LOG_PATH):
         try:
@@ -338,42 +272,20 @@ def save_full_history(history):
     with open(HISTORY_LOG_PATH, "w") as f:
         json.dump(history, f, indent=2)
 
-
-# ----------------------------------------------------
-# 6. SINGLE-RUN EXPERIMENT FUNCTION
-# ----------------------------------------------------
-
 def run_experiment(embedding_type: str):
-    """
-    Run a full training + validation experiment for a single embedding type:
-    - "glove"
-    - "fasttext"
-    - "tfidf"
-    (Uses embedding_utils.get_embedding_matrix, including TF-IDF pipeline.)
-    """
     # Make a fresh config per run
     CONFIG = BASE_CONFIG.copy()
     CONFIG["EMBEDDING_TYPE"] = embedding_type
-
-    print("\n========================================================")
-    print(f"🚀 STARTING EXPERIMENT: {embedding_type.upper()}")
-    print("========================================================")
+    print(f"STARTING EXPERIMENT: {embedding_type.upper()}")
     print(f"Using device: {device}")
     os.makedirs(CONFIG["RESULTS_DIR"], exist_ok=True)
 
-    # --- Load Embeddings via embedding_utils (this includes TF-IDF logic) ---
     print(f"Loading embeddings via embedding_utils: {embedding_type}...")
     emb_matrix, emb_dim, tok2idx, idx2tok = get_embedding_matrix(
         embedding_type,
         vocab_path=CONFIG["VOCAB_PATH"],
         repr_dir=osp.dirname(CONFIG["PREPROCESSED_CSV"]),
     )
-
-    # If random: choose an embedding dimension manually
-    if embedding_type == "random":
-        if emb_dim is None:
-            emb_dim = 256
-        emb_matrix = None
 
     if tok2idx is None:
         print("ERROR: Failed to load vocab or embedding matrix. Check preprocessing + paths.")
@@ -391,7 +303,6 @@ def run_experiment(embedding_type: str):
     print(f"PAD idx: {pad_idx}  SOS idx: {sos_idx}  EOS idx: {eos_idx}  UNK idx: {unk_idx}")
     print(f"Embedding dim: {emb_dim}")
 
-    # --- Models ---
     encoder = CustomCNNEncoder(output_dim=CONFIG["IMAGE_FEATURE_DIM"]).to(device)
     decoder = EmotionLSTMDecoder(
         vocab_size=vocab_size,
@@ -403,7 +314,6 @@ def run_experiment(embedding_type: str):
         embedding_matrix=emb_matrix,
     ).to(device)
 
-    # --- Data ---
     train_data = ArtemisCaptioningDataset(
         CONFIG["PREPROCESSED_CSV"], "train", CONFIG["IMAGE_FEAT_DIR"]
     )
@@ -423,12 +333,10 @@ def run_experiment(embedding_type: str):
         shuffle=False,
     )
 
-    # --- Loss & Optimizer ---
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
     params = list(encoder.parameters()) + list(decoder.parameters())
     optimizer = torch.optim.Adam(params, lr=CONFIG["LEARNING_RATE"])
 
-    # --- Training loop ---
     best_val_loss = float("inf")
     current_run_history = {
         "embedding_type": embedding_type,
@@ -472,8 +380,6 @@ def run_experiment(embedding_type: str):
             )
 
     current_run_history["final_val_loss"] = val_loss
-
-    # --- Save full history (shared JSON) ---
     full_history = load_full_history()
     if embedding_type not in full_history:
         full_history[embedding_type] = []
@@ -484,23 +390,13 @@ def run_experiment(embedding_type: str):
     print(f"Final Val Loss: {val_loss:.4f}")
     print(f"Results logged to {HISTORY_LOG_PATH}")
 
-
-# ----------------------------------------------------
-# 7. MAIN – MULTI-LOOP OVER THREE EMBEDDINGS
-# ----------------------------------------------------
-
 def main():
-    # Three embedding types to run in sequence (like Script B),
-    # but using embedding_utils + 2-layer LSTM from Script A.
     EMBEDDING_TYPES = ["glove", "fasttext", "tfidf"]
 
     for emb_type in EMBEDDING_TYPES:
         run_experiment(emb_type)
 
-    print("\n--------------------------------------------------------")
-    print("🎉 All three embedding experiments are complete.")
-    print("--------------------------------------------------------")
-
+    print("\n Completed!")
 
 if __name__ == "__main__":
     main()

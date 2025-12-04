@@ -63,11 +63,7 @@ def clean_caption(text: str) -> str:
     return " ".join(words).strip()
 
 def greedy_decode(encoder, decoder, image, emo_id, idx2tok, max_len):
-    """
-    Greedy decoding for one image-emotion pair.
-    Uses global START_TOKEN_ID / END_TOKEN_ID / PAD_TOKEN_ID,
-    and removes leading emotion-word from the decoded sentence.
-    """
+    #Greedy decoding for one image-emotion pair.
     encoder.eval()
     decoder.eval()
 
@@ -97,7 +93,7 @@ def greedy_decode(encoder, decoder, image, emo_id, idx2tok, max_len):
         if next_id == END_TOKEN_ID or next_id == PAD_TOKEN_ID:
             break
 
-        # skip emotion-word as *first* generated token
+        # skip emotion-word as generated token
         if len(result_ids) == 0 and idx2tok.get(next_id, "") in EMOTION_WORDS:
             continue
 
@@ -234,7 +230,7 @@ def evaluate_all_embeddings():
 
             arr = np.load(npy_path)
             if arr.ndim == 3:
-                # (H,W,3) -> (3,H,W)
+                # (H,W,3) to (3,H,W)
                 img = torch.tensor(arr).permute(2, 0, 1).float()
             else:
                 img = torch.tensor(arr).float()
@@ -273,7 +269,6 @@ def evaluate_all_embeddings():
                     "gt": gt,
                 })
 
-        # finalize scores
         all_results[emb] = {
             "bleu4": total_bleu4 / n if n else 0.0,
             "rouge1_f": total_rouge1 / n if n else 0.0,
@@ -286,8 +281,6 @@ def evaluate_all_embeddings():
         print(f"\n[{emb}] BLEU-4:   {all_results[emb]['bleu4']:.4f}")
         print(f"[{emb}] ROUGE-1: {all_results[emb]['rouge1_f']:.4f}")
         print(f"[{emb}] ROUGE-L: {all_results[emb]['rougeL_f']:.4f}")
-
-    # JSON outputs
 
     out_dir = CONFIG["RESULTS_DIR"]
     os.makedirs(out_dir, exist_ok=True)

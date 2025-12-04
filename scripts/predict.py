@@ -1,40 +1,3 @@
-#!/usr/bin/env python3
-"""
-predict.py  (VLT + CNN/LSTM)
-
-Use:
-- Vision-Language Transformer with emotion conditioning (Model 2 / VLT)
-- CNN + Emotion-aware LSTM (Model 1 / CNN)
-
-to generate captions for a few (image, emotion) inputs.
-
-Assumptions
------------
-Image features (for both models) live at:
-    new_preprocessed/features/<painting>.npy  (H,W,3 in [0,1])
-
-VLT (Transformer) checkpoints:
-    new_checkpoints/glove/m2_glove_best.pt
-    new_checkpoints/fasttext/m2_fasttext_best.pt
-Each checkpoint contains:
-    - "cfg"      : config dict used in training
-    - "tok2idx"  : vocabulary mapping {token -> idx}
-    - "model_state_dict"
-
-CNN+LSTM checkpoints (from new_m1.py):
-    eval_outputs/results_cnn_lstm/best_model_glove.pth
-    eval_outputs/results_cnn_lstm/best_model_fasttext.pth
-    eval_outputs/results_cnn_lstm/best_model_tfidf.pth
-Each contains:
-    - "config"              : config dict from training
-    - "tok2idx"             : vocabulary mapping {token -> idx}
-    - "encoder_state_dict"
-    - "decoder_state_dict"
-
-Run:
-    python3 scripts/predict.py
-"""
-
 import json
 from pathlib import Path
 from typing import Dict, List, Tuple, Any
@@ -46,16 +9,11 @@ import torch.nn.functional as F
 from M2_transformers import VisionLanguageTransformerEmotion
 from M1_CNN import CustomCNNEncoder, EmotionLSTMDecoder
 
-# ---------------------------------------------------------------------
-# Paths / config
-# ---------------------------------------------------------------------
 FEATURES_ROOT = "new_preprocessed/features"
 
-# VLT checkpoints
 CKPT_VLT_GLOVE    = "new_checkpoints/glove/m2_glove_best.pt"
 CKPT_VLT_FASTTEXT = "new_checkpoints/fasttext/m2_fasttext_best.pt"
 
-# CNN checkpoints (from new_m1.py)
 CKPT_CNN_ROOT = "eval_outputs/results_cnn_lstm"
 
 EMO_ID2NAME = {
@@ -65,16 +23,7 @@ EMO_ID2NAME = {
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-# ---------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------
 def load_feature(features_root: str, painting_name: str) -> torch.Tensor:
-    """
-    Load precomputed image feature from .npy:
-        <features_root>/<painting_name>.npy
-    Returns tensor of shape (1,3,H,W).
-    """
     path = Path(features_root) / f"{painting_name}.npy"
     if not path.exists():
         raise FileNotFoundError(f"Feature not found: {path}")
@@ -92,10 +41,7 @@ def tokens_to_caption(
     eos_idx: int,
     pad_idx: int
 ) -> str:
-    """
-    Convert token ids into text, skipping special tokens
-    and stopping at EOS.
-    """
+
     words = []
     for tid in token_ids:
         tid = int(tid)
@@ -109,19 +55,10 @@ def tokens_to_caption(
         words.append(w)
     return " ".join(words)
 
-
-# ---------------------------------------------------------------------
-# VLT (Transformer) loading + decoding
-# ---------------------------------------------------------------------
 def load_vlt_from_ckpt(
     ckpt_path: str,
 ) -> Tuple[VisionLanguageTransformerEmotion, Dict[str, int]]:
-    """
-    Load VisionLanguageTransformerEmotion + tok2idx from a VLT checkpoint:
-      - "cfg"
-      - "tok2idx"
-      - "model_state_dict"
-    """
+
     ck = torch.load(ckpt_path, map_location=DEVICE)
 
     if "cfg" not in ck or "tok2idx" not in ck:
@@ -154,10 +91,6 @@ def greedy_vlt(
     tok2idx: Dict[str, int],
     idx2tok: Dict[int, str],
 ) -> str:
-    """
-    Greedy decoding for the VLT model with emotion conditioning.
-    Returns a caption string.
-    """
     pad_idx = tok2idx["<pad>"]
     sos_idx = tok2idx["<start>"]
     eos_idx = tok2idx["<end>"]
@@ -170,7 +103,6 @@ def greedy_vlt(
     model.eval()
     with torch.no_grad():
         for _ in range(max_len):
-            # pad to max_len so shape matches training
             padded = F.pad(cur, (0, max_len - cur.size(1)), value=pad_idx)
             logits = model(img, padded, emo)      # (1, T, V)
             step_idx = cur.size(1) - 1
@@ -182,20 +114,10 @@ def greedy_vlt(
     ids = cur.squeeze(0).tolist()
     return tokens_to_caption(ids, idx2tok, eos_idx, pad_idx)
 
-
-# ---------------------------------------------------------------------
-# CNN+LSTM loading + decoding
-# ---------------------------------------------------------------------
 def load_cnn_from_ckpt(
     emb_type: str
 ) -> Tuple[CustomCNNEncoder, EmotionLSTMDecoder, Dict[str, int]]:
-    """
-    Load CNN encoder + LSTM decoder + tok2idx from a new_m1 checkpoint:
-      - "config"
-      - "tok2idx"
-      - "encoder_state_dict"
-      - "decoder_state_dict"
-    """
+
     ckpt_path = Path(CKPT_CNN_ROOT) / f"best_model_{emb_type}.pth"
     ck = torch.load(ckpt_path, map_location=DEVICE)
 
@@ -243,11 +165,7 @@ def greedy_cnn(
     tok2idx: Dict[str, int],
     max_len: int = 25,
 ) -> str:
-    """
-    Greedy decoding for the CNN+LSTM model with emotion conditioning.
-    - Skips emotion word if it appears as the first generated token
-    - Removes '*' from the final caption
-    """
+
     idx2tok = {i: t for t, i in tok2idx.items()}
 
     pad_idx = tok2idx.get("<pad>", 0)
@@ -283,8 +201,6 @@ def greedy_cnn(
 
             word = idx2tok.get(next_id, "")
 
-            # 👉 if this is the first generated token and it's an emotion word,
-            #    feed it into the LSTM but do NOT keep it in the caption
             if len(result_ids) == 0 and word in EMOTION_WORDS:
                 cur = torch.cat(
                     [cur, torch.tensor([[next_id]], device=DEVICE)],
@@ -307,13 +223,9 @@ def greedy_cnn(
     caption = caption.replace("*", "").strip()
 
     return caption
-# ---------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------
+
 def main():
     print("Using device:", DEVICE)
-
-    # 1) Load transformer (VLT) models (GloVe & FastText)
     vlt_models = {}
     vlt_tok2idx = {}
     vlt_idx2tok = {}
@@ -334,8 +246,6 @@ def main():
 
     if not vlt_models:
         print("[WARN] No VLT models loaded – check CKPT paths.")
-
-    # 2) Load CNN+LSTM (M1) models (GloVe, FastText, TF-IDF)
     cnn_encoders = {}
     cnn_decoders = {}
     cnn_tok2idx = {}
@@ -355,13 +265,10 @@ def main():
 
     if not cnn_encoders:
         print("[WARN] No CNN models loaded – check eval_outputs/results_cnn_lstm.")
-        # still continue with VLT-only if available
-
-    # 3) Define the samples you want to show
+       
     samples = [
         # Make sure these exist under new_preprocessed/features
         {"painting": "arkhip-kuindzhi_birches-1879", "emotion": 1},
-        # add more if you like
         # {"painting": "gustave-dore_elijah-is-nourished-by-an-angel", "emotion": 2},
     ]
 
@@ -389,7 +296,6 @@ def main():
             "generations": {}
         }
 
-        # --- VLT generations ---
         for name, model in vlt_models.items():
             cap = greedy_vlt(
                 model=model,
@@ -401,14 +307,13 @@ def main():
             print(f"[VLT-{name}]  {cap}")
             gen_entry["generations"][f"vlt_{name}"] = cap
 
-        # --- CNN generations ---
         for name, enc in cnn_encoders.items():
             dec = cnn_decoders[name]
             tok2idx = cnn_tok2idx[name]
             cap_cnn = greedy_cnn(
                 encoder=enc,
                 decoder=dec,
-                img=img.squeeze(0),  # greedy_cnn can handle 3D or 4D
+                img=img.squeeze(0),
                 emo_id=emo_id,
                 tok2idx=tok2idx,
             )
@@ -417,7 +322,6 @@ def main():
 
         results.append(gen_entry)
 
-    # 4) Save outputs for your report
     out_json = Path("predict_outputs_vlt_cnn.json")
     with open(out_json, "w") as f:
         json.dump(results, f, indent=2)

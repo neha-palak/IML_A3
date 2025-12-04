@@ -90,7 +90,6 @@ def build_vocab(counter, max_size=None, specials=SPECIAL_TOKENS):
     return token_to_idx
 
 def ensure_emotion_tokens_in_vocab(token_to_idx, emotion_words):
-    """Make sure every emotion word is present in vocab. If missing, append."""
     added = []
     for emo in emotion_words:
         if emo not in token_to_idx:
@@ -117,7 +116,7 @@ def main(args):
     images_out = osp.join(args.out_dir, "images_subset")
     features_out = osp.join(args.out_dir, "features")
 
-    # CLEANUP: remove old images/features before new run
+    #remove old images/features before new run
     shutil.rmtree(images_out, ignore_errors=True)
     shutil.rmtree(features_out, ignore_errors=True)
 
@@ -135,7 +134,7 @@ def main(args):
         df = df.drop_duplicates(subset=['painting','utterance']).reset_index(drop=True)
         print(f"Deduplicated rows: {before} -> {len(df)}")
 
-    # Subsample paintings if requested
+    # Subsample painting
     if args.subsample_size is not None and args.subsample_size > 0:
         print(f"Subsampling to {args.subsample_size} unique paintings (stratified by art_style)...")
         if args.subsample_by_style:
@@ -163,7 +162,6 @@ def main(args):
     emotion_counts = df['emotion'].value_counts().to_dict()
     print("Emotion counts (kept):", emotion_counts)
 
-    # Copy + resize images and save normalized .npy features (one per painting)
     if args.copy_images:
         print("Copying + resizing images from wiki root:", args.wiki_root)
         copied = 0
@@ -197,7 +195,6 @@ def main(args):
     else:
         print("Skipping image copy/resize (--copy-images not set)")
 
-    # Clean text & tokenize (use spaCy pipeline)
     print("Cleaning text and tokenizing using spaCy...")
     df['utter_clean'] = df['utterance'].astype(str).apply(clean_text)
     texts = df['utter_clean'].tolist()
@@ -206,7 +203,6 @@ def main(args):
     df['tokens_len'] = df['tokens'].apply(len)
     print("Tokenization complete. Sample tokens:", df['tokens'].iloc[0] if len(df)>0 else None)
 
-    # Create emotion-prepended utterances/tokens (but we will keep original as well)
     print("Building emotion-prepended text (kept in same CSV)...")
     df['utter_with_emotion'] = df['emotion'].astype(str) + " " + df['utter_clean'].astype(str)
     texts_emo = df['utter_with_emotion'].tolist()
@@ -214,7 +210,7 @@ def main(args):
     df['tokens_with_emotion'] = tokens_list_emo
     df['tokens_with_emotion_len'] = df['tokens_with_emotion'].apply(len)
 
-    # Drop too short / too long if requested (based on original tokens)
+    # Drop too short / too long 
     if args.min_len > 0:
         before = len(df)
         df = df[df['tokens_len'] >= args.min_len].reset_index(drop=True)
@@ -228,7 +224,7 @@ def main(args):
     df = split_by_painting(df, split_loads=args.split_loads, seed=args.seed)
     print("Split counts:\n", df['split'].value_counts())
 
-    # Build vocab from training split tokens (original tokens, not emotion-prepended)
+    # Build vocab from training split tokens
     print("Building vocab from training split (original tokens)...")
     train_tokens = df[df['split']=='train']['tokens'].tolist()
     counter = Counter()
@@ -241,28 +237,23 @@ def main(args):
         print("Added emotion tokens to vocab (ensured presence):", added_emotions)
     print("Vocab size:", len(token_to_idx))
 
-    # Save vocab (pickle)
     vocab_path = osp.join(args.out_dir, "vocab.pkl")
     with open(vocab_path, "wb") as f:
         pickle.dump(token_to_idx, f)
     print("Saved vocab ->", vocab_path)
 
-    # Encode tokens into token_ids (pad/truncate to max_len)
+    # Encode tokens into token_ids
     print("Encoding tokens to token_ids (max_len):", args.max_len)
     df['token_ids'] = df['tokens'].apply(lambda t: encode_tokens(t, token_to_idx, args.max_len))
     df['token_ids_c1'] = df['token_ids']  # alias: original
-
-    # Encode tokens_with_emotion into token ids (separate column)
     df['token_ids_with_emotion'] = df['tokens_with_emotion'].apply(lambda t: encode_tokens(t, token_to_idx, args.max_len))
 
-    # BEFORE SAVING: stringify token/token_id lists so CSV is safe and easy to read
     df_to_save = df.copy()
     df_to_save['tokens_str'] = df_to_save['tokens'].apply(lambda x: " ".join(x) if isinstance(x, list) else "")
     df_to_save['tokens_with_emotion_str'] = df_to_save['tokens_with_emotion'].apply(lambda x: " ".join(x) if isinstance(x, list) else "")
     df_to_save['token_ids_str'] = df_to_save['token_ids'].apply(lambda x: str(x))
     df_to_save['token_ids_with_emotion_str'] = df_to_save['token_ids_with_emotion'].apply(lambda x: str(x))
 
-    # Keep original useful columns and the stringified fields in a single CSV
     cols_keep = [
         'art_style','painting','emotion','utterance','repetition',
         'emotion_label','utter_clean','tokens_str','tokens_len',
@@ -301,9 +292,6 @@ def main(args):
     print("Saved summary ->", osp.join(args.out_dir, "preprocessing_summary.json"))
     print("Done.")
 
-# ----------------------------
-# CLI arguments
-# ----------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="ArtEmis preprocessing (spaCy tokenization) - single CSV output")
     p.add_argument("--raw-csv", type=str, default="artemis_dataset.csv")
@@ -325,9 +313,7 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    # normalize None/0 for subsample
     if args.subsample_size is None or args.subsample_size <= 0:
         args.subsample_size = None
-    # map arg names used inside main
     args.max_vocab_size = getattr(args, "max_vocab_size", args.max_vocab_size if hasattr(args, "max_vocab_size") else args.max_vocab_size)
     main(args)
